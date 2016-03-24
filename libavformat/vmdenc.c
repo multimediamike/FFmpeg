@@ -28,6 +28,7 @@
 
 #define VMD_HEADER_SIZE 0x32E
 #define PALETTE_SIZE 768
+#define FRAME_TABLE_INC_SIZE 100
 
 typedef struct
 {
@@ -37,12 +38,13 @@ typedef struct
 
 typedef struct
 {
-    int video_frame_count;
     int video_width;
     int video_height;
     int video_stream;
     int audio_stream;
-    FrameTableEntry frame_table[100];
+    FrameTableEntry *frame_table;
+    int video_frame_table_size;
+    int video_frame_count;
 } VmdEncContext;
 
 static int vmd_write_header(AVFormatContext *s)
@@ -63,9 +65,15 @@ static int vmd_write_header(AVFormatContext *s)
             vmd->audio_stream = i;
     }
 
+    /* initialize frame table */
+    vmd->video_frame_table_size = FRAME_TABLE_INC_SIZE;
+    vmd->frame_table = av_malloc(vmd->video_frame_table_size * sizeof(FrameTableEntry));
+    if (!vmd->frame_table)
+        return -1;
+
     vmd->video_frame_count = 0;
-    vmd->video_width = 280;
-    vmd->video_height = 218;
+    vmd->video_width = s->streams[vmd->video_stream]->codec->width;
+    vmd->video_height = s->streams[vmd->video_stream]->codec->height;
 
     /* placeholder palette until the first frame transports the correct one */
     memset(palette, 0, PALETTE_SIZE);
@@ -104,7 +112,7 @@ static int vmd_write_packet(AVFormatContext *s, AVPacket *pkt)
     uint8_t palette[AVPALETTE_SIZE];
     int i;
 
-/* skip non-video streams */
+/* skip non-video streams for now */
 if (pkt->stream_index != vmd->video_stream)
     return 0;
 
@@ -130,6 +138,15 @@ if (pkt->stream_index != vmd->video_stream)
 
         /* go back to the current position */
         avio_seek(pb, current_offset, SEEK_SET);
+    }
+
+    /* allocate more space in the frame table as needed */
+    if (vmd->video_frame_count == vmd->video_frame_table_size)
+    {
+        vmd->video_frame_table_size += FRAME_TABLE_INC_SIZE;
+        vmd->frame_table = av_realloc(vmd->frame_table, vmd->video_frame_table_size * sizeof(FrameTableEntry));
+        if (!vmd->frame_table)
+            return -1;
     }
 
     /* note the current offset and the frame length */
