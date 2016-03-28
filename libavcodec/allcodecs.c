@@ -339,7 +339,7 @@ void avcodec_register_all(void)
     REGISTER_DECODER(VC1_QSV,           vc1_qsv);
     REGISTER_ENCODER(VC2,               vc2);
     REGISTER_DECODER(VCR1,              vcr1);
-    REGISTER_DECODER(VMDVIDEO,          vmdvideo);
+    REGISTER_ENCDEC (VMDVIDEO,          vmdvideo);
     REGISTER_DECODER(VMNC,              vmnc);
     REGISTER_DECODER(VP3,               vp3);
     REGISTER_DECODER(VP5,               vp5);

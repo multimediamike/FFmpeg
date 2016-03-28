@@ -37,6 +37,7 @@
 
 #include "libavutil/common.h"
 #include "libavutil/intreadwrite.h"
+#include "libavutil/tree.h"
 
 #include "avcodec.h"
 #include "internal.h"
@@ -472,4 +473,221 @@ AVCodec ff_vmdvideo_decoder = {
     .close          = vmdvideo_decode_end,
     .decode         = vmdvideo_decode_frame,
     .capabilities   = AV_CODEC_CAP_DR1,
+};
+
+#define PALETTE_SIZE (256 * 3)
+#define VMD_SIDE_DATA_SIZE ((2*4) + 1 + 1 + PALETTE_SIZE)
+
+typedef struct {
+    int rgb;  /* will be used for comparisons; only bottom 24 bits are set */
+    uint8_t index;
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+} PaletteEntry;
+
+typedef struct {
+    struct AVTreeNode *palette;
+    int palette_count;
+    int current_frame;
+    uint8_t *frames[2];
+    uint8_t *diff;
+    int frame_size;
+    int keyframe;
+} VmdVideoEncContext;
+
+static int palette_compare(const void *key, const void *b)
+{
+    int key_int;
+    PaletteEntry *b_struct;
+
+    key_int = *(const int *)key;
+    b_struct = (PaletteEntry*)b;
+
+    return key_int - b_struct->rgb;
+}
+
+static int palette_enumerate(void *opaque, void *elem)
+{
+    uint8_t *palette;
+    PaletteEntry *entry;
+    int i;
+
+    palette = (uint8_t*)opaque;
+    entry = (PaletteEntry*)elem;
+    i = entry->index;
+    palette[i*3+0] = entry->r;
+    palette[i*3+1] = entry->g;
+    palette[i*3+2] = entry->b;
+
+    return 0;
+}
+
+static av_cold int vmdvideo_encode_init(AVCodecContext *avctx)
+{
+    VmdVideoEncContext *const s = avctx->priv_data;
+
+    s->palette = NULL;
+    s->palette_count = 0;
+
+    s->frame_size = avctx->width * avctx->height * sizeof(uint8_t);
+    s->current_frame = 0;
+    s->frames[0] = av_malloc(s->frame_size);
+    s->frames[1] = av_malloc(s->frame_size);
+    s->diff = av_malloc(s->frame_size);
+    s->keyframe = 1;
+
+    return 0;
+}
+
+static int vmdvideo_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
+                                 const AVFrame *pict, int *got_packet)
+{
+    int x, y;
+    VmdVideoEncContext *const s = avctx->priv_data;
+    uint8_t *pixel;
+    uint8_t r, g, b;
+    int rgb;
+    PaletteEntry *entry, *next[2] = {NULL, NULL};
+    struct AVTreeNode *node;
+    int ret;
+    uint8_t *cur_frame;
+    uint8_t *prev_frame;
+    int cur_index;
+    int initial_palette_count;
+    uint8_t *side_data;
+    uint8_t palette[PALETTE_SIZE];
+
+static int count = 0;
+av_log(NULL, AV_LOG_INFO, "... %d, %dx%d, linesize = %d\n", count++, pict->width, pict->height, pict->linesize[0]);
+
+    cur_frame = s->frames[s->current_frame];
+    prev_frame = s->frames[!s->current_frame];
+
+    if ((ret = ff_alloc_packet2(avctx, pkt,
+        s->frame_size + AV_INPUT_BUFFER_MIN_SIZE, 0)) < 0)
+        return ret;
+
+    if (avctx->pix_fmt != AV_PIX_FMT_BGR24) {
+        av_log(avctx, AV_LOG_ERROR, "unsupported pixel format\n");
+        return -1;
+    }
+
+    /* Iterate over the frame's pixels and build the palette by using a
+     * sorted tree. If the color is not already in the tree, create a new
+     * palette index. Convert the image at the same time. */
+    cur_index = 0;
+    initial_palette_count = s->palette_count;
+    for (y = 0; y < pict->height; y++)
+    {
+        pixel = &pict->data[0][y * pict->linesize[0]];
+        for (x = 0; x < pict->width; x++)
+        {
+            /* fetch the pixel elements, scaling them down in advance */
+            b = *pixel++ >> 2;
+            g = *pixel++ >> 2;
+            r = *pixel++ >> 2;
+            rgb = (r << 16) | (g << 8) | b;
+
+            /* check if there is already a palette entry */
+            entry = av_tree_find(s->palette, &rgb, palette_compare, (void**)next);
+            if (!entry)
+            {
+                node = av_tree_node_alloc();
+                entry = av_malloc(sizeof(PaletteEntry));
+                if (!node || !entry)
+                {
+                    ret = AVERROR(ENOMEM);
+                    goto fail;
+                }
+                entry->r = r;
+                entry->g = g;
+                entry->b = b;
+                entry->rgb = rgb;
+                entry->index = s->palette_count++;
+                av_tree_insert(&s->palette, entry, palette_compare, &node);
+            }
+            cur_frame[cur_index++] = entry->index;
+        }
+    }
+
+av_log(NULL, AV_LOG_INFO, "%d palette entries\n", s->palette_count);
+if (s->palette_count > initial_palette_count)
+  av_log(NULL, AV_LOG_INFO, "  **** more colors found!\n");
+
+    /* diff the the previous frame and the current frame */
+    if (!s->keyframe)
+    {
+        memset(s->diff, 0, s->frame_size);
+        for (x = 0; x < s->frame_size; x++)
+        {
+            if (cur_frame[x] != prev_frame[x])
+                s->diff[x] = cur_frame[x];
+        }
+    }
+
+    /* copy whole frame for now */
+    pkt->data[0] = 2;  /* uncompressed, raw video */
+    memcpy(&pkt->data[1], cur_frame, s->frame_size);
+
+    /* create the side channel data */
+    side_data = av_packet_new_side_data(pkt, AV_PKT_DATA_NEW_EXTRADATA,
+        VMD_SIDE_DATA_SIZE);
+    side_data[0] = 0;  /* top left */
+    side_data[1] = 0;
+    side_data[2] = 0;  /* top right */
+    side_data[3] = 0;
+    side_data[4] = (pict->width >> 8) & 0xFF;  /* width */
+    side_data[5] = (pict->width >> 0) & 0xFF;
+    side_data[6] = (pict->height >> 8) & 0xFF;  /* height */
+    side_data[7] = (pict->height >> 0) & 0xFF;
+    if (initial_palette_count == 0)
+        side_data[8] = 1;  /* new palette incoming */
+    side_data[9] = s->palette_count - initial_palette_count;
+
+    /* update the palette sent to the muxer */
+    if (s->palette_count > initial_palette_count)
+    {
+        memset(palette, 0, PALETTE_SIZE);
+        av_tree_enumerate(s->palette, palette, NULL, palette_enumerate);
+        memcpy(&side_data[10], &palette[initial_palette_count * 3],
+            (s->palette_count - initial_palette_count) * 3);
+    }
+
+    s->current_frame = !s->current_frame;
+
+    if (s->keyframe)
+    {
+        pkt->flags |= AV_PKT_FLAG_KEY;
+        s->keyframe = 0;
+    }
+    *got_packet = 1;
+    return 0;
+
+fail:
+    return ret;
+}
+
+static av_cold int vmdvideo_encode_end(AVCodecContext *avctx)
+{
+    VmdVideoEncContext *const s = avctx->priv_data;
+
+    av_free(s->frames[0]);
+    av_free(s->frames[1]);
+    av_free(s->diff);
+
+    return 0;
+}
+
+AVCodec ff_vmdvideo_encoder = {
+    .name           = "vmdvideo",
+    .long_name      = NULL_IF_CONFIG_SMALL("Sierra VMD video"),
+    .type           = AVMEDIA_TYPE_VIDEO,
+    .id             = AV_CODEC_ID_VMDVIDEO,
+    .priv_data_size = sizeof(VmdVideoEncContext),
+    .init           = vmdvideo_encode_init,
+    .encode2        = vmdvideo_encode_frame,
+    .close          = vmdvideo_encode_end,
+    .pix_fmts       = (const enum AVPixelFormat[]) { AV_PIX_FMT_BGR24,
+                                                     AV_PIX_FMT_NONE },
 };

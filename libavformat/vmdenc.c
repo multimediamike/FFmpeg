@@ -214,10 +214,9 @@ AVOutputFormat ff_vmd_muxer = {
     .extensions        = "vmd",
     .priv_data_size    = sizeof(VmdEncContext),
     .audio_codec       = AV_CODEC_ID_PCM_S16LE,
-    .video_codec       = AV_CODEC_ID_RAWVIDEO,
+    .video_codec       = AV_CODEC_ID_VMDVIDEO,
     .write_header      = vmd_write_header,
     .write_packet      = vmd_write_packet,
     .write_trailer     = vmd_write_trailer,
-//    .codec_tag         = (const AVCodecTag* const []){ ff_voc_codec_tags, 0 },
     .flags             = AVFMT_NOTIMESTAMPS,
 };
