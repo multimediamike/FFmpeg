@@ -555,8 +555,8 @@ static int vmdvideo_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     uint8_t *prev_frame;
     int cur_index;
     int initial_palette_count;
-    uint8_t *side_data;
     uint8_t palette[PALETTE_SIZE];
+    uint8_t *enc_ptr;
 
 static int count = 0;
 av_log(NULL, AV_LOG_INFO, "... %d, %dx%d, linesize = %d\n", count++, pict->width, pict->height, pict->linesize[0]);
@@ -565,8 +565,9 @@ av_log(NULL, AV_LOG_INFO, "... %d, %dx%d, linesize = %d\n", count++, pict->width
     prev_frame = s->frames[!s->current_frame];
 
     if ((ret = ff_alloc_packet2(avctx, pkt,
-        s->frame_size + AV_INPUT_BUFFER_MIN_SIZE, 0)) < 0)
+        VMD_SIDE_DATA_SIZE + 1 + s->frame_size, 0)) < 0)
         return ret;
+    enc_ptr = pkt->data;
 
     if (avctx->pix_fmt != AV_PIX_FMT_BGR24) {
         av_log(avctx, AV_LOG_ERROR, "unsupported pixel format\n");
@@ -611,9 +612,11 @@ av_log(NULL, AV_LOG_INFO, "... %d, %dx%d, linesize = %d\n", count++, pict->width
         }
     }
 
+#if 0
 av_log(NULL, AV_LOG_INFO, "%d palette entries\n", s->palette_count);
 if (s->palette_count > initial_palette_count)
   av_log(NULL, AV_LOG_INFO, "  **** more colors found!\n");
+#endif
 
     /* diff the the previous frame and the current frame */
     if (!s->keyframe)
@@ -626,33 +629,34 @@ if (s->palette_count > initial_palette_count)
         }
     }
 
-    /* copy whole frame for now */
-    pkt->data[0] = 2;  /* uncompressed, raw video */
-    memcpy(&pkt->data[1], cur_frame, s->frame_size);
-
-    /* create the side channel data */
-    side_data = av_packet_new_side_data(pkt, AV_PKT_DATA_NEW_EXTRADATA,
-        VMD_SIDE_DATA_SIZE);
-    side_data[0] = 0;  /* top left */
-    side_data[1] = 0;
-    side_data[2] = 0;  /* top right */
-    side_data[3] = 0;
-    side_data[4] = (pict->width >> 8) & 0xFF;  /* width */
-    side_data[5] = (pict->width >> 0) & 0xFF;
-    side_data[6] = (pict->height >> 8) & 0xFF;  /* height */
-    side_data[7] = (pict->height >> 0) & 0xFF;
+    /* encode the side channel data at the front of the frame */
+    *enc_ptr++ = 0;  /* top left */
+    *enc_ptr++ = 0;
+    *enc_ptr++ = 0;  /* top right */
+    *enc_ptr++ = 0;
+    *enc_ptr++ = ((pict->width - 1) >> 8) & 0xFF;  /* width */
+    *enc_ptr++ = ((pict->width - 1) >> 0) & 0xFF;
+    *enc_ptr++ = ((pict->height - 1) >> 8) & 0xFF;  /* height */
+    *enc_ptr++ = ((pict->height - 1) >> 0) & 0xFF;
     if (initial_palette_count == 0)
-        side_data[8] = 1;  /* new palette incoming */
-    side_data[9] = s->palette_count - initial_palette_count;
+        *enc_ptr++ = 1;  /* new palette incoming */
+    else
+        *enc_ptr++ = 0;  /* no new palette */
+    *enc_ptr++ = s->palette_count - initial_palette_count;
 
     /* update the palette sent to the muxer */
     if (s->palette_count > initial_palette_count)
     {
         memset(palette, 0, PALETTE_SIZE);
         av_tree_enumerate(s->palette, palette, NULL, palette_enumerate);
-        memcpy(&side_data[10], &palette[initial_palette_count * 3],
+        memcpy(enc_ptr, &palette[initial_palette_count * 3],
             (s->palette_count - initial_palette_count) * 3);
     }
+    enc_ptr += PALETTE_SIZE;
+
+    /* copy whole frame for now */
+    *enc_ptr++ = 2;  /* uncompressed, raw video */
+    memcpy(enc_ptr, cur_frame, s->frame_size);
 
     s->current_frame = !s->current_frame;
 

@@ -28,6 +28,7 @@
 
 #define VMD_HEADER_SIZE 0x32E
 #define PALETTE_SIZE 768
+#define VMD_SIDE_DATA_SIZE ((2*4) + 1 + 1 + PALETTE_SIZE)
 #define FRAME_TABLE_INC_SIZE 100
 
 typedef struct
@@ -40,11 +41,13 @@ typedef struct
 {
     int video_width;
     int video_height;
+    int frame_size;
     int video_stream;
     int audio_stream;
     FrameTableEntry *frame_table;
     int video_frame_table_size;
     int video_frame_count;
+    int64_t palette_offset;  /* points to the current base palette offset */
 } VmdEncContext;
 
 static int vmd_write_header(AVFormatContext *s)
@@ -74,6 +77,8 @@ static int vmd_write_header(AVFormatContext *s)
     vmd->video_frame_count = 0;
     vmd->video_width = s->streams[vmd->video_stream]->codec->width;
     vmd->video_height = s->streams[vmd->video_stream]->codec->height;
+    vmd->frame_size = vmd->video_width * vmd->video_height;
+    vmd->palette_offset = 28;  /* initial offset, found in the main header */
 
     /* placeholder palette until the first frame transports the correct one */
     memset(palette, 0, PALETTE_SIZE);
@@ -81,19 +86,21 @@ static int vmd_write_header(AVFormatContext *s)
     /* write the header (with a lot of placeholders) */
     avio_wl16(pb, VMD_HEADER_SIZE);  /* 0-1: header size */
     avio_wl16(pb, 0);  /* 2-3: VMD handle */
-    avio_wl16(pb, 0);  /* 4-5: unknown */
+    avio_wl16(pb, 1);  /* 4-5: unknown; real sample use 1 */
     avio_wl16(pb, 0);  /* 6-7: number of blocks in ToC (fill in later) */
     avio_wl16(pb, 0);  /* 8-9: top corner coordinate of video frame */
     avio_wl16(pb, 0);  /* 10-11: left corner coordinate of video frame */
     avio_wl16(pb, vmd->video_width); /* 12-13: width of video frame */
     avio_wl16(pb, vmd->video_height); /* 14-15: height of video frame */
-    avio_wl16(pb, 0);  /* 16-17: flags */
+    avio_wl16(pb, 0x4081);  /* 16-17: flags; unknown, except for 0x1000, which indicates audio */
     avio_wl16(pb, 1);  /* 18-19: frames per block */
     avio_wl32(pb, 2 + VMD_HEADER_SIZE);  /* 20-23: absolute offset of multimedia data */
-    avio_wl32(pb, 0);  /* 24-27: unknown */
+    avio_wl16(pb, 0);  /* 24-25: unknown */
+    avio_w8(pb, 0xf7);  /* 26: unknown */
+    avio_w8(pb, 0x23);  /* 27: unknown */
     avio_write(pb, palette, PALETTE_SIZE);  /* initially zero palette (fill in later) */
-    avio_wl32(pb, 64000); /* bytes 796-799: buffer size for data frame load buffer */
-    avio_wl32(pb, 64000); /* bytes 800-803: buffer size needed for decoding */
+    avio_wl32(pb, vmd->frame_size + 1); /* bytes 796-799: buffer size for data frame load buffer (set equal to max possible; fill in more accurate value later) */
+    avio_wl32(pb, vmd->frame_size + 1); /* bytes 800-803: buffer size needed for decoding */
     avio_wl16(pb, 0);  /* bytes 804-805: audio sample rate */
     avio_wl16(pb, 0);  /* bytes 806-807: audio frame length / sample resolution */
     avio_wl16(pb, 0);  /* bytes 808-809: number of sound buffers */
@@ -109,32 +116,50 @@ static int vmd_write_packet(AVFormatContext *s, AVPacket *pkt)
 //    AVCodecContext *enc = s->streams[0]->codec;
     AVIOContext *pb = s->pb;
     int64_t current_offset;
-    uint8_t palette[AVPALETTE_SIZE];
-    int i;
+    uint8_t *enc_ptr;
+    int enc_size;
+
+    /* for parsing the side data */
+    int left_coord;
+    int top_coord;
+    int right_coord;
+    int bottom_coord;
+    int new_palette;
+    int new_palette_entries;
+    uint8_t *palette;
+
+    /* parse out the side data */
+    enc_ptr = pkt->data;
+    enc_size = pkt->size - VMD_SIDE_DATA_SIZE;
+    left_coord = (enc_ptr[0] << 8)| enc_ptr[1];
+    top_coord = (enc_ptr[2] << 8)| enc_ptr[3];
+    right_coord = (enc_ptr[4] << 8)| enc_ptr[5];
+    bottom_coord = (enc_ptr[6] << 8)| enc_ptr[7];
+    enc_ptr += 8;
+    new_palette = *enc_ptr++;
+    new_palette_entries = *enc_ptr++;
+    palette = enc_ptr;
+    enc_ptr += PALETTE_SIZE;
 
 /* skip non-video streams for now */
 if (pkt->stream_index != vmd->video_stream)
+{
+av_log(NULL, AV_LOG_INFO, "audio: %d bytes\n", pkt->size);
     return 0;
+}
 
     /* first video frame; fetch the palette and rewind to write in header */
-    if (pkt->stream_index == vmd->video_stream && vmd->video_frame_count == 0)
+    if (pkt->stream_index == vmd->video_stream && new_palette_entries > 0)
     {
         /* get the current offset before seeking back */
         current_offset = avio_seek(pb, 0, SEEK_CUR);
 
         /* go back to the palette in the header */
-        avio_seek(pb, 28, SEEK_SET);
+        avio_seek(pb, vmd->palette_offset, SEEK_SET);
 
-        /* get the palette from the packet */
-        ff_get_packet_palette(s, pkt, CONTAINS_PAL, (uint32_t*)palette);
-
-        /* write the palette; scale down to 0..63 range */
-        for (i = 0; i < 256; i++)
-        {
-            avio_w8(pb, palette[i*4+2] >> 2);
-            avio_w8(pb, palette[i*4+1] >> 2);
-            avio_w8(pb, palette[i*4+0] >> 2);
-        }
+        /* copy the new palette entries */
+        avio_write(pb, palette, new_palette_entries * 3);
+        vmd->palette_offset += (new_palette_entries * 3);
 
         /* go back to the current position */
         avio_seek(pb, current_offset, SEEK_SET);
@@ -151,10 +176,9 @@ if (pkt->stream_index != vmd->video_stream)
 
     /* note the current offset and the frame length */
     vmd->frame_table[vmd->video_frame_count].offset = avio_tell(pb);
-    vmd->frame_table[vmd->video_frame_count].size = 1 + vmd->video_width * vmd->video_height;
+    vmd->frame_table[vmd->video_frame_count].size = enc_size;
 
-    avio_w8(pb, 2);  /* uncompressed, raw video */
-    avio_write(pb, pkt->data, pkt->size);
+    avio_write(pb, enc_ptr, enc_size);
 
     vmd->video_frame_count++;
 
@@ -193,10 +217,11 @@ static int vmd_write_trailer(AVFormatContext *s)
 
         avio_w8(pb, 1);  /* byte 0: audio frame */
         avio_w8(pb, 0);  /* byte 1: unknown */
-        avio_wl16(pb, 0);
-        avio_wl32(pb, 0);
-        avio_wl32(pb, 0);
-        avio_wl32(pb, 0);
+        avio_wl32(pb, 0);  /* bytes 2-5: frame length */
+        avio_w8(pb, 0);  /* byte 6: audio flags */
+        avio_w8(pb, 0);  /* byte 7: unknown */
+        avio_wl32(pb, 0);  /* bytes 8-11: unknown */
+        avio_wl32(pb, 0);  /* bytes 12-15: unknown */
     }
 
     /* fill in the missing items in the header */
