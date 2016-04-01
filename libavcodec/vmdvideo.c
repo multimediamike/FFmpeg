@@ -628,7 +628,7 @@ av_log(NULL, AV_LOG_INFO, "... %d, %dx%d, linesize = %d\n", count++, pict->width
     {
 av_log(NULL, AV_LOG_INFO, "  HEY! palette reset\n");
         s->palette_count = 0;
-/* FIXME: free the tree correctly here */
+        av_tree_destroy(s->palette);
         s->palette = NULL;
         initial_palette_count = 0;
         ret = process_colors(s, pict, cur_frame);
