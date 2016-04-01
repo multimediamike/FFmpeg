@@ -540,45 +540,20 @@ static av_cold int vmdvideo_encode_init(AVCodecContext *avctx)
     return 0;
 }
 
-static int vmdvideo_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
-                                 const AVFrame *pict, int *got_packet)
+static int process_colors(VmdVideoEncContext *const s, const AVFrame *pict, uint8_t *cur_frame)
 {
     int x, y;
-    VmdVideoEncContext *const s = avctx->priv_data;
     uint8_t *pixel;
     uint8_t r, g, b;
     int rgb;
-    PaletteEntry *entry, *next[2] = {NULL, NULL};
-    struct AVTreeNode *node;
-    int ret;
-    uint8_t *cur_frame;
-    uint8_t *prev_frame;
     int cur_index;
-    int initial_palette_count;
-    uint8_t palette[PALETTE_SIZE];
-    uint8_t *enc_ptr;
-
-static int count = 0;
-av_log(NULL, AV_LOG_INFO, "... %d, %dx%d, linesize = %d\n", count++, pict->width, pict->height, pict->linesize[0]);
-
-    cur_frame = s->frames[s->current_frame];
-    prev_frame = s->frames[!s->current_frame];
-
-    if ((ret = ff_alloc_packet2(avctx, pkt,
-        VMD_SIDE_DATA_SIZE + 1 + s->frame_size, 0)) < 0)
-        return ret;
-    enc_ptr = pkt->data;
-
-    if (avctx->pix_fmt != AV_PIX_FMT_BGR24) {
-        av_log(avctx, AV_LOG_ERROR, "unsupported pixel format\n");
-        return -1;
-    }
+    struct AVTreeNode *node;
+    PaletteEntry *entry, *next[2] = {NULL, NULL};
 
     /* Iterate over the frame's pixels and build the palette by using a
      * sorted tree. If the color is not already in the tree, create a new
      * palette index. Convert the image at the same time. */
     cur_index = 0;
-    initial_palette_count = s->palette_count;
     for (y = 0; y < pict->height; y++)
     {
         pixel = &pict->data[0][y * pict->linesize[0]];
@@ -598,8 +573,7 @@ av_log(NULL, AV_LOG_INFO, "... %d, %dx%d, linesize = %d\n", count++, pict->width
                 entry = av_malloc(sizeof(PaletteEntry));
                 if (!node || !entry)
                 {
-                    ret = AVERROR(ENOMEM);
-                    goto fail;
+                    return AVERROR(ENOMEM);
                 }
                 entry->r = r;
                 entry->g = g;
@@ -612,7 +586,57 @@ av_log(NULL, AV_LOG_INFO, "... %d, %dx%d, linesize = %d\n", count++, pict->width
         }
     }
 
-#if 0
+    return 0;
+}
+
+static int vmdvideo_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
+                                 const AVFrame *pict, int *got_packet)
+{
+    VmdVideoEncContext *const s = avctx->priv_data;
+    int ret;
+    uint8_t *cur_frame;
+    uint8_t *prev_frame;
+    uint8_t palette[PALETTE_SIZE];
+    uint8_t *enc_ptr;
+    int initial_palette_count;
+    int x;
+
+static int count = 0;
+av_log(NULL, AV_LOG_INFO, "... %d, %dx%d, linesize = %d\n", count++, pict->width, pict->height, pict->linesize[0]);
+
+    cur_frame = s->frames[s->current_frame];
+    prev_frame = s->frames[!s->current_frame];
+
+    if ((ret = ff_alloc_packet2(avctx, pkt,
+        VMD_SIDE_DATA_SIZE + 1 + s->frame_size, 0)) < 0)
+        return ret;
+    enc_ptr = pkt->data;
+
+    if (avctx->pix_fmt != AV_PIX_FMT_BGR24) {
+        av_log(avctx, AV_LOG_ERROR, "unsupported pixel format\n");
+        return -1;
+    }
+
+    /* convert the BGR24 frame -> PAL8 frame, expanding the palette as necessary */
+    initial_palette_count = s->palette_count;
+    ret = process_colors(s, pict, cur_frame);
+    if (ret != 0)
+        return ret;
+
+    /* if palette overflows, reset the palette and re-process frame */
+    if (s->palette_count > 256)
+    {
+av_log(NULL, AV_LOG_INFO, "  HEY! palette reset\n");
+        s->palette_count = 0;
+/* FIXME: free the tree correctly here */
+        s->palette = NULL;
+        initial_palette_count = 0;
+        ret = process_colors(s, pict, cur_frame);
+        if (ret != 0)
+            return ret;
+    }
+
+#if 1
 av_log(NULL, AV_LOG_INFO, "%d palette entries\n", s->palette_count);
 if (s->palette_count > initial_palette_count)
   av_log(NULL, AV_LOG_INFO, "  **** more colors found!\n");
@@ -667,9 +691,6 @@ if (s->palette_count > initial_palette_count)
     }
     *got_packet = 1;
     return 0;
-
-fail:
-    return ret;
 }
 
 static av_cold int vmdvideo_encode_end(AVCodecContext *avctx)
