@@ -523,12 +523,44 @@ static int palette_enumerate(void *opaque, void *elem)
     return 0;
 }
 
+static int reset_palette(VmdVideoEncContext *const s)
+{
+    struct AVTreeNode *node;
+    PaletteEntry *entry;
+
+    /* free existing tree */
+    if (s->palette)
+        av_tree_destroy(s->palette);
+    s->palette = NULL;
+    s->palette_count = 0;
+
+    /* color 0 needs to be black as it's used for background and
+     * interlace fill in Sierra game engines */
+    node = av_tree_node_alloc();
+    entry = av_malloc(sizeof(PaletteEntry));
+    if (!node || !entry)
+    {
+        return AVERROR(ENOMEM);
+    }
+    entry->r = 0;
+    entry->g = 0;
+    entry->b = 0;
+    entry->rgb = 0;
+    entry->index = s->palette_count++;
+    av_tree_insert(&s->palette, entry, palette_compare, &node);
+
+    return 0;
+}
+
 static av_cold int vmdvideo_encode_init(AVCodecContext *avctx)
 {
     VmdVideoEncContext *const s = avctx->priv_data;
+    int ret;
 
     s->palette = NULL;
-    s->palette_count = 0;
+    ret = reset_palette(s);
+    if (ret < 0)
+        return 0;
 
     s->frame_size = avctx->width * avctx->height * sizeof(uint8_t);
     s->current_frame = 0;
@@ -627,9 +659,9 @@ av_log(NULL, AV_LOG_INFO, "... %d, %dx%d, linesize = %d\n", count++, pict->width
     if (s->palette_count > 256)
     {
 av_log(NULL, AV_LOG_INFO, "  HEY! palette reset\n");
-        s->palette_count = 0;
-        av_tree_destroy(s->palette);
-        s->palette = NULL;
+        ret = reset_palette(s);
+        if (ret < 0)
+            return 0;
         initial_palette_count = 0;
         ret = process_colors(s, pict, cur_frame);
         if (ret != 0)
