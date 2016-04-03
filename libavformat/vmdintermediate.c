@@ -82,23 +82,8 @@ static int vmd_write_packet(AVFormatContext *s, AVPacket *pkt)
     palette = enc_ptr;
     enc_ptr += PALETTE_SIZE;
 
-    /* wipe the existing palette if a new palette is incoming */
-    if (new_palette)
-    {
-        memset(vmd->palette, 0, PALETTE_SIZE);
-        vmd->palette_count = 0;
-    }
-
-    /* first video frame; fetch the palette and rewind to write in header */
-    if (new_palette_entries > 0)
-    {
-        /* copy the new palette entries */
-        memcpy(&vmd->palette[vmd->palette_count * 3], palette, new_palette_entries * 3);
-        vmd->palette_count += new_palette_entries;
-    }
-
     /* write the frame's palette */
-    avio_write(pb, vmd->palette, PALETTE_SIZE);
+    avio_write(pb, palette, PALETTE_SIZE);
 
     /* write the frame's dimension and encoding size and, finally, frame data */
     avio_wl16(pb, left_coord);

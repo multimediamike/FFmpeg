@@ -673,8 +673,7 @@ if (s->palette_count > initial_palette_count)
     {
         memset(palette, 0, PALETTE_SIZE);
         av_tree_enumerate(s->palette, palette, NULL, palette_enumerate);
-        memcpy(enc_ptr, &palette[initial_palette_count * 3],
-            (s->palette_count - initial_palette_count) * 3);
+        memcpy(enc_ptr, palette, PALETTE_SIZE);
     }
     enc_ptr += PALETTE_SIZE;
 
