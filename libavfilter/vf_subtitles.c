@@ -54,6 +54,7 @@ typedef struct {
     char *charenc;
     char *force_style;
     int stream_index;
+    int disable_blending;
     uint8_t rgba_map[4];
     int     pix_step[4];       ///< steps per pixel for each plane of the main output
     int original_w, original_h;
@@ -161,10 +162,26 @@ static int config_input(AVFilterLink *inlink)
 static void overlay_ass_image(AssContext *ass, AVFrame *picref,
                               const ASS_Image *image)
 {
+    int x, y;
+    uint8_t pixel;
+
     for (; image; image = image->next) {
         uint8_t rgba_color[] = {AR(image->color), AG(image->color), AB(image->color), AA(image->color)};
         FFDrawColor color;
         ff_draw_color(&ass->draw, &color, rgba_color);
+
+        if (ass->disable_blending)
+        {
+            for (y = 0; y < image->h; y++)
+            {
+                for (x = 0; x < image->w; x++)
+                {
+                    pixel = image->bitmap[y * image->stride + x];
+                    image->bitmap[y * image->stride + x] = (pixel >= 0x80) ? 0xFF : 0x00;
+                }
+            }
+        }
+
         ff_blend_mask(&ass->draw, &color,
                       picref->data, picref->linesize,
                       picref->width, picref->height,
@@ -218,6 +235,7 @@ static const AVOption ass_options[] = {
         {"auto", NULL,                 0, AV_OPT_TYPE_CONST, {.i64 = -1},                  INT_MIN, INT_MAX, FLAGS, "shaping_mode"},
         {"simple",  "simple shaping",  0, AV_OPT_TYPE_CONST, {.i64 = ASS_SHAPING_SIMPLE},  INT_MIN, INT_MAX, FLAGS, "shaping_mode"},
         {"complex", "complex shaping", 0, AV_OPT_TYPE_CONST, {.i64 = ASS_SHAPING_COMPLEX}, INT_MIN, INT_MAX, FLAGS, "shaping_mode"},
+        {"disable_blending", "disable blending", OFFSET(disable_blending), AV_OPT_TYPE_INT, { .i64 = 0 },  0,       1,  FLAGS},
     {NULL},
 };
 
