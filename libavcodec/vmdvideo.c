@@ -477,6 +477,7 @@ AVCodec ff_vmdvideo_decoder = {
 
 #define PALETTE_SIZE (256 * 3)
 #define VMD_SIDE_DATA_SIZE ((2*4) + 1 + 1 + PALETTE_SIZE)
+#define VMD_MAX_RUN 128
 
 typedef struct {
     int rgb;  /* will be used for comparisons; only bottom 24 bits are set */
@@ -490,8 +491,7 @@ typedef struct {
     struct AVTreeNode *palette;
     int palette_count;
     int current_frame;
-    uint8_t *frames[2];
-    uint8_t *diff;
+    uint8_t *frames[4];
     int frame_size;
     int keyframe;
 } VmdVideoEncContext;
@@ -566,7 +566,8 @@ static av_cold int vmdvideo_encode_init(AVCodecContext *avctx)
     s->current_frame = 0;
     s->frames[0] = av_malloc(s->frame_size);
     s->frames[1] = av_malloc(s->frame_size);
-    s->diff = av_malloc(s->frame_size);
+    s->frames[2] = av_malloc(s->frame_size);
+    s->frames[3] = av_malloc(s->frame_size);
     s->keyframe = 1;
 
     return 0;
@@ -630,21 +631,30 @@ static int vmdvideo_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     uint8_t *prev_frame;
     uint8_t palette[PALETTE_SIZE];
     uint8_t *enc_ptr;
+    uint8_t *diff;
+    uint8_t *compress;
     int initial_palette_count;
     int x;
-
-static int count = 0;
-av_log(NULL, AV_LOG_INFO, "... %d, %dx%d, linesize = %d\n", count++, pict->width, pict->height, pict->linesize[0]);
+    int y;
+    int index;
+    int leftedge;
+    int topedge;
+    int rightedge;
+    int bottomedge;
+    int linediffsum;
+    int current_run;
+    int searching_for_0;
+    int encoding_method;
+    int encoding_space;
+int total_pixels_accounted;
 
     cur_frame = s->frames[s->current_frame];
     prev_frame = s->frames[!s->current_frame];
+    diff = s->frames[2];
+    compress = s->frames[3];
 
-    if ((ret = ff_alloc_packet2(avctx, pkt,
-        VMD_SIDE_DATA_SIZE + 1 + s->frame_size, 0)) < 0)
-        return ret;
-    enc_ptr = pkt->data;
-
-    if (avctx->pix_fmt != AV_PIX_FMT_BGR24) {
+    if (avctx->pix_fmt != AV_PIX_FMT_BGR24)
+    {
         av_log(avctx, AV_LOG_ERROR, "unsupported pixel format\n");
         return -1;
     }
@@ -658,7 +668,6 @@ av_log(NULL, AV_LOG_INFO, "... %d, %dx%d, linesize = %d\n", count++, pict->width
     /* if palette overflows, reset the palette and re-process frame */
     if (s->palette_count > 256)
     {
-av_log(NULL, AV_LOG_INFO, "  HEY! palette reset\n");
         ret = reset_palette(s);
         if (ret < 0)
             return 0;
@@ -668,32 +677,131 @@ av_log(NULL, AV_LOG_INFO, "  HEY! palette reset\n");
             return ret;
     }
 
-#if 1
-av_log(NULL, AV_LOG_INFO, "%d palette entries\n", s->palette_count);
-if (s->palette_count > initial_palette_count)
-  av_log(NULL, AV_LOG_INFO, "  **** more colors found!\n");
-#endif
-
-    /* diff the the previous frame and the current frame */
-    if (!s->keyframe)
+    /* if palette is still too large, this isn't going to work */
+    if (s->palette_count > 256)
     {
-        memset(s->diff, 0, s->frame_size);
-        for (x = 0; x < s->frame_size; x++)
-        {
-            if (cur_frame[x] != prev_frame[x])
-                s->diff[x] = cur_frame[x];
-        }
+        av_log(avctx, AV_LOG_FATAL, "Too many colors (%d > 256); can not encode to VMD\n", s->palette_count);
+        return -1;
     }
 
+    /* diff the the previous frame and the current frame */
+    leftedge = 0;
+    topedge = 0;
+    rightedge = (pict->width - 1);
+    bottomedge = (pict->height - 1);
+    if (!s->keyframe)
+    {
+        memset(diff, 0, s->frame_size);
+        for (y = 0; y < pict->height; y++)
+        {
+            index = y * pict->width;
+            linediffsum = 0;
+            for (x = index; x < index + pict->width; x++)
+            {
+                if (cur_frame[x] != prev_frame[x])
+                    diff[x] = cur_frame[x];
+                linediffsum += diff[x];
+            }
+        }
+    }
+if (leftedge != 0 || topedge != 0 || rightedge != (pict->width - 1) || bottomedge != (pict->height - 1))
+  av_log(NULL, AV_LOG_INFO, "  key: %d, edges: %d, %d, %d, %d\n", s->keyframe, leftedge, topedge, rightedge, bottomedge);
+
+    /* select encoding method */
+    if (s->keyframe)
+    {
+        /* keyframes always use method 2 (uncompressed) */
+        encoding_method = 2;
+        encoding_space = s->frame_size;
+    }
+    else
+    {
+        /* try to compress interframes using method 1; assume method 1
+         * unless compressed data is larger than it would be if encoded raw */
+        encoding_method = 1;
+        compress = s->frames[3];
+        encoding_space = s->frame_size;
+
+        for (y = topedge; y <= bottomedge; y++)
+        {
+//av_log(NULL, AV_LOG_INFO, "%d pixels accounted for on line %d (%d -> %d = %d)\n", total_pixels_accounted, y-1, leftedge, rightedge, (rightedge - leftedge + 1));
+            index = y * pict->width + leftedge;
+            if (diff[index])
+                searching_for_0 = 1;
+            else
+                searching_for_0 = 0;
+            index++;
+            current_run = 1;
+total_pixels_accounted = 0;
+            for (x = leftedge + 1; x <= rightedge + 1; x++, index++)
+            {
+                /* basically, search for boundaries between runs of 0s and runs
+                 * of non-0s; max run length is 128 */
+                if ((searching_for_0 && !diff[index]) ||
+                    (!searching_for_0 && diff[index]) ||
+                    (current_run == VMD_MAX_RUN) ||
+                    (x == rightedge+1))
+                {
+                    if (searching_for_0)
+                    {
+                        /* make sure there is enough space left */
+                        if (encoding_space < current_run + 1)
+                        {
+                            /* use raw encoding */
+                            encoding_method = 2;
+                            break;
+                        }
+
+                        /* searching for 0, so encode a run from current frame */
+                        *compress++ = 0x80 | (current_run - 1);
+                        memcpy(compress, &diff[index - current_run], current_run);
+                        compress += current_run;
+                        encoding_space -= (current_run + 1);
+                    }
+                    else
+                    {
+                        /* make sure there is enough space left */
+                        if (encoding_space < 1)
+                        {
+                            /* use raw encoding */
+                            encoding_method = 2;
+                            break;
+                        }
+
+                        /* searching for 1, so encode a run from previous frame */
+                        *compress++ = current_run - 1;
+                        encoding_space--;
+                    }
+
+                    /* reset; don't toggle the flag if this conditional was entered
+                     * due to run max */
+                    if (current_run < VMD_MAX_RUN)
+                        searching_for_0 = !searching_for_0;
+total_pixels_accounted += current_run;
+                    current_run = 1;
+                }
+                else
+                    current_run++;
+            }
+        }
+        encoding_space = s->frame_size - encoding_space;
+    }
+
+    /* the size of the encoded data frame is known; allocate packet */
+    if ((ret = ff_alloc_packet2(avctx, pkt,
+        VMD_SIDE_DATA_SIZE + 1 + encoding_space, 0)) < 0)
+        return ret;
+    enc_ptr = pkt->data;
+
     /* encode the side channel data at the front of the frame */
-    *enc_ptr++ = 0;  /* top left */
-    *enc_ptr++ = 0;
-    *enc_ptr++ = 0;  /* top right */
-    *enc_ptr++ = 0;
-    *enc_ptr++ = ((pict->width - 1) >> 8) & 0xFF;  /* width */
-    *enc_ptr++ = ((pict->width - 1) >> 0) & 0xFF;
-    *enc_ptr++ = ((pict->height - 1) >> 8) & 0xFF;  /* height */
-    *enc_ptr++ = ((pict->height - 1) >> 0) & 0xFF;
+    *enc_ptr++ = (leftedge >> 8) & 0xFF;
+    *enc_ptr++ = leftedge & 0xFF;
+    *enc_ptr++ = (topedge >> 8) & 0xFF;
+    *enc_ptr++ = topedge & 0xFF;
+    *enc_ptr++ = (rightedge >> 8) & 0xFF;
+    *enc_ptr++ = rightedge & 0xFF;
+    *enc_ptr++ = (bottomedge >> 8) & 0xFF;
+    *enc_ptr++ = bottomedge & 0xFF;
     if (initial_palette_count == 0)
         *enc_ptr++ = 1;  /* new palette incoming */
     else
@@ -709,9 +817,19 @@ if (s->palette_count > initial_palette_count)
     }
     enc_ptr += PALETTE_SIZE;
 
-    /* copy whole frame for now */
-    *enc_ptr++ = 2;  /* uncompressed, raw video */
-    memcpy(enc_ptr, cur_frame, s->frame_size);
+    if (encoding_method == 2)
+    {
+        /* raw encoding */
+        *enc_ptr++ = 2;
+        memcpy(enc_ptr, cur_frame, encoding_space);
+    }
+    else if (encoding_method == 1)
+    {
+        /* previous run encoding on non-keyframes */
+        compress = s->frames[3];
+        *enc_ptr++ = 1;
+        memcpy(enc_ptr, compress, encoding_space);
+    }
 
     s->current_frame = !s->current_frame;
 
@@ -730,7 +848,8 @@ static av_cold int vmdvideo_encode_end(AVCodecContext *avctx)
 
     av_free(s->frames[0]);
     av_free(s->frames[1]);
-    av_free(s->diff);
+    av_free(s->frames[2]);
+    av_free(s->frames[3]);
 
     return 0;
 }
