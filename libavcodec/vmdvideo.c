@@ -59,6 +59,8 @@ typedef struct VmdVideoContext {
     int unpack_buffer_size;
 
     int x_off, y_off;
+    FILE *side_channel;
+    int frame_count;
 } VmdVideoContext;
 
 #define QUEUE_SIZE 0x1000
@@ -371,6 +373,13 @@ static int vmd_decode(VmdVideoContext *s, AVFrame *frame)
 static av_cold int vmdvideo_decode_end(AVCodecContext *avctx)
 {
     VmdVideoContext *s = avctx->priv_data;
+    uint8_t write_buf[2];
+
+    fseek(s->side_channel, 0, SEEK_SET);
+    write_buf[0] = s->frame_count & 0xFF;
+    write_buf[1] = (s->frame_count >> 8) & 0xFF;
+    fwrite(write_buf, 2, 1, s->side_channel);
+    fclose(s->side_channel);
 
     av_frame_free(&s->prev_frame);
     av_freep(&s->unpack_buffer);
@@ -388,9 +397,20 @@ static av_cold int vmdvideo_decode_init(AVCodecContext *avctx)
     unsigned char r, g, b;
     unsigned char *vmd_header;
     unsigned char *raw_palette;
+    uint8_t write_buf[6];
 
     s->avctx = avctx;
     avctx->pix_fmt = AV_PIX_FMT_PAL8;
+
+    s->frame_count = 0;
+    s->side_channel = fopen("raw-vmd-frames", "wb");
+    write_buf[0] = 0;
+    write_buf[1] = 0;
+    write_buf[2] = avctx->width & 0xFF;
+    write_buf[3] = (avctx->width >> 8) & 0xFF;
+    write_buf[4] = avctx->height & 0xFF;
+    write_buf[5] = (avctx->height >> 8) & 0xFF;
+    fwrite(write_buf, 6, 1, s->side_channel);
 
     /* make sure the VMD header made it */
     if (s->avctx->extradata_size != VMD_HEADER_SIZE) {
@@ -436,6 +456,8 @@ static int vmdvideo_decode_frame(AVCodecContext *avctx,
     VmdVideoContext *s = avctx->priv_data;
     AVFrame *frame = data;
     int ret;
+    uint8_t *line_ptr;
+    int y;
 
     s->buf = buf;
     s->size = buf_size;
@@ -448,6 +470,15 @@ static int vmdvideo_decode_frame(AVCodecContext *avctx,
 
     if ((ret = vmd_decode(s, frame)) < 0)
         return ret;
+
+    /* dump to side channel file */
+    s->frame_count++;
+    line_ptr = frame->data[0];
+    for (y = 0; y < avctx->height; y++)
+    {
+        fwrite(line_ptr, frame->linesize[0], 1, s->side_channel);
+        line_ptr += frame->linesize[0];
+    }
 
     /* make the palette available on the way out */
     memcpy(frame->data[1], s->palette, PALETTE_COUNT * 4);
@@ -646,7 +677,8 @@ static int vmdvideo_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     int searching_for_0;
     int encoding_method;
     int encoding_space;
-int total_pixels_accounted;
+//int total_pixels_accounted;
+//int count_of_max_runs = 0;
 
     cur_frame = s->frames[s->current_frame];
     prev_frame = s->frames[!s->current_frame];
@@ -709,6 +741,7 @@ if (leftedge != 0 || topedge != 0 || rightedge != (pict->width - 1) || bottomedg
 
     /* select encoding method */
     if (s->keyframe)
+//    if (1)
     {
         /* keyframes always use method 2 (uncompressed) */
         encoding_method = 2;
@@ -732,7 +765,7 @@ if (leftedge != 0 || topedge != 0 || rightedge != (pict->width - 1) || bottomedg
                 searching_for_0 = 0;
             index++;
             current_run = 1;
-total_pixels_accounted = 0;
+//total_pixels_accounted = 0;
             for (x = leftedge + 1; x <= rightedge + 1; x++, index++)
             {
                 /* basically, search for boundaries between runs of 0s and runs
@@ -777,7 +810,6 @@ total_pixels_accounted = 0;
                      * due to run max */
                     if (current_run < VMD_MAX_RUN)
                         searching_for_0 = !searching_for_0;
-total_pixels_accounted += current_run;
                     current_run = 1;
                 }
                 else
@@ -786,6 +818,7 @@ total_pixels_accounted += current_run;
         }
         encoding_space = s->frame_size - encoding_space;
     }
+//av_log(avctx, AV_LOG_INFO, "max runs = %d\n", count_of_max_runs);
 
     /* the size of the encoded data frame is known; allocate packet */
     if ((ret = ff_alloc_packet2(avctx, pkt,
