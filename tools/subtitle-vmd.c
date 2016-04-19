@@ -6,14 +6,14 @@
 
 #include <ass/ass.h>
 
-#define READ_LE_16(x) ((((uint8_t*)(x))[1] <<  8) | ((uint8_t*)(x))[0])
+#define LE_16(x) ((((uint8_t*)(x))[1] <<  8) | ((uint8_t*)(x))[0])
 
-#define READ_LE_32(x) (((uint32_t)(((uint8_t*)(x))[3]) << 24) |  \
+#define LE_32(x) (((uint32_t)(((uint8_t*)(x))[3]) << 24) |  \
                              (((uint8_t*)(x))[2]  << 16) |  \
                              (((uint8_t*)(x))[1]  <<  8) |  \
                               ((uint8_t*)(x))[0])
 
-#define AV_RL16 READ_LE_16
+#define AV_RL16 LE_16
 
 #define VMD_HEADER_SIZE 0x330
 #define BLOCK_RECORD_SIZE 6
@@ -129,11 +129,11 @@ static int load_and_copy_vmd_header(vmd_dec_context *vmd, FILE *invmd_file, FILE
     }
 
     /* load some interesting pieces */
-    vmd->width = READ_LE_16(&vmd->header[12]);
-    vmd->height = READ_LE_16(&vmd->header[14]);
-    vmd->block_count = READ_LE_16(&vmd->header[6]);
-    vmd->frames_per_block = READ_LE_16(&vmd->header[18]);
-    toc_offset = READ_LE_32(&vmd->header[812]);
+    vmd->width = LE_16(&vmd->header[12]);
+    vmd->height = LE_16(&vmd->header[14]);
+    vmd->block_count = LE_16(&vmd->header[6]);
+    vmd->frames_per_block = LE_16(&vmd->header[18]);
+    toc_offset = LE_32(&vmd->header[812]);
     max_length = 0;
 
     /* copy to the output */
@@ -159,8 +159,8 @@ static int load_and_copy_vmd_header(vmd_dec_context *vmd, FILE *invmd_file, FILE
             printf("failed to read block record\n");
             return 0;
         }
-        vmd->blocks[i].unknown_b0_b1 = READ_LE_16(&buf[0]);
-        vmd->blocks[i].offset = READ_LE_32(&buf[2]);
+        vmd->blocks[i].unknown_b0_b1 = LE_16(&buf[0]);
+        vmd->blocks[i].offset = LE_32(&buf[2]);
     }
     /* frame table */
     for (i = 0; i < vmd->block_count * vmd->frames_per_block; i++)
@@ -172,11 +172,11 @@ static int load_and_copy_vmd_header(vmd_dec_context *vmd, FILE *invmd_file, FILE
         }
         vmd->frames[i].type = buf[0];
         vmd->frames[i].unknown_b1 = buf[1];
-        vmd->frames[i].length = READ_LE_32(&buf[2]);
-        vmd->frames[i].leftedge = READ_LE_16(&buf[6]);
-        vmd->frames[i].topedge = READ_LE_16(&buf[8]);
-        vmd->frames[i].rightedge = READ_LE_16(&buf[10]);
-        vmd->frames[i].bottomedge = READ_LE_16(&buf[12]);
+        vmd->frames[i].length = LE_32(&buf[2]);
+        vmd->frames[i].leftedge = LE_16(&buf[6]);
+        vmd->frames[i].topedge = LE_16(&buf[8]);
+        vmd->frames[i].rightedge = LE_16(&buf[10]);
+        vmd->frames[i].bottomedge = LE_16(&buf[12]);
         vmd->frames[i].unknown_b14 = buf[14];
         vmd->frames[i].video_flags = buf[15];
 
@@ -436,9 +436,9 @@ int main(int argc, char *argv[])
     }
     /* load the short header from the raw frame file */
     fread(read_buf, 6, 1, raw_file);
-    raw_frame_count = READ_LE_16(&read_buf[0]);
-    raw_width = READ_LE_16(&read_buf[2]);
-    raw_height = READ_LE_16(&read_buf[4]);
+    raw_frame_count = LE_16(&read_buf[0]);
+    raw_width = LE_16(&read_buf[2]);
+    raw_height = LE_16(&read_buf[4]);
 
     /* open the output file */
     outvmd_file = fopen(outvmd_filename, "wb");
