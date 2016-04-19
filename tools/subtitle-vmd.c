@@ -1,3 +1,10 @@
+/*
+ * subtitle-vmd.c
+ *
+ * build with this command:
+ *   gcc -g -Wall subtitle-vmd.c -o subtitle-vmd -lm -lass
+ */
+
 #include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
@@ -18,7 +25,7 @@
 #define VMD_HEADER_SIZE 0x330
 #define BLOCK_RECORD_SIZE 6
 #define FRAME_RECORD_SIZE 16
-#define PALETTE_COUNT 768
+#define PALETTE_COUNT 256
 #define SUBTITLE_THRESHOLD 0x70
 
 typedef struct
@@ -57,12 +64,11 @@ typedef struct
     uint8_t *prev_frame;
     int frame_size;
 
-    uint8_t fg_index;
-    uint8_t bg_index;
-
     ASS_Library *ass_lib;
     ASS_Renderer *ass_renderer;
     ASS_Track *ass_track;
+
+    uint8_t palette[PALETTE_COUNT * 3];
 } vmd_dec_context;
 
 /* compute Euclidean distance between an RGB color and the desired target */
@@ -73,41 +79,35 @@ static int compute_rgb_distance(int r1, int r2, int g1, int g2, int b1, int b2)
                 (b1 - b2) * (b1 - b2));
 }
 
-/* This function finds the colors in the palette closest to black and white.
- * The palette parameter needs to point to 768 bytes. */
-static void find_subtitle_colors(vmd_dec_context *vmd, uint8_t *palette)
+static uint8_t find_nearest_color(vmd_dec_context *vmd, int r, int g, int b)
 {
     int i;
-    uint8_t r, g, b;
+    int nearest_distance;
     int distance;
-    int closest_fg_distance;
-    int closest_bg_distance;
+    int rp;
+    int gp;
+    int bp;
+    uint8_t palette_index;
 
-    closest_fg_distance = 999999999;
-    closest_bg_distance = 999999999;
-
-    for (i = 0; i < PALETTE_COUNT; i++)
+    nearest_distance = 999999999;
+    palette_index = 0;
+    for (i = 0; i < 256; i++)
     {
-        r = palette[i * 3 + 0];
-        g = palette[i * 3 + 1];
-        b = palette[i * 3 + 2];
-
-        /* find closest foreground match (63, 63, 63) */
-        distance = compute_rgb_distance(r, 63, g, 63, b, 63);
-        if (distance < closest_fg_distance)
+        rp = vmd->palette[i * 3 + 0];
+        gp = vmd->palette[i * 3 + 1];
+        bp = vmd->palette[i * 3 + 2];
+        distance = compute_rgb_distance(r, rp, g, gp, b, bp);
+        if (distance < nearest_distance)
         {
-            closest_fg_distance = distance;
-            vmd->fg_index = i;
+            nearest_distance = distance;
+            palette_index = i;
         }
-
-        /* find closest background match (0, 0, 0) */
-        distance = compute_rgb_distance(r, 0, g, 0, b, 0);
-        if (distance < closest_bg_distance)
-        {
-            closest_bg_distance = distance;
-            vmd->bg_index = i;
-        }
+        /* can't get closer than 0; break early */
+        if (distance == 0)
+            break;
     }
+
+    return palette_index;
 }
 
 static int load_and_copy_vmd_header(vmd_dec_context *vmd, FILE *invmd_file, FILE *outvmd_file)
@@ -116,7 +116,6 @@ static int load_and_copy_vmd_header(vmd_dec_context *vmd, FILE *invmd_file, FILE
     uint32_t toc_offset;
     unsigned char buf[FRAME_RECORD_SIZE];
     uint32_t max_length;
-//    uint32_t max_buffer_size;
 
     fseek(invmd_file, 0, SEEK_SET);
     fseek(outvmd_file, 0, SEEK_SET);
@@ -143,8 +142,8 @@ static int load_and_copy_vmd_header(vmd_dec_context *vmd, FILE *invmd_file, FILE
         return 0;
     }
 
-    /* find the best colors to use for subtitles */
-    find_subtitle_colors(vmd, &vmd->header[28]);
+    /* store the palette for finding color matches */
+    memcpy(vmd->palette, &vmd->header[28], PALETTE_COUNT * 3);
 
     /* load the ToC */
     fseek(invmd_file, toc_offset, SEEK_SET);
@@ -224,16 +223,6 @@ static int copy_blocks(vmd_dec_context *vmd, FILE *invmd_file, FILE *raw_file,
                 return 0;
             }
 
-#if 0
-/* phase 1: straight copy */
-            /* copy the frame */
-            if (fwrite(vmd->buf, vmd->frames[i].length, 1, outvmd_file) != 1)
-            {
-                printf("failed to write frame\n");
-                return 0;
-            }
-#else
-/* phase 2: grab the corresponding frame from the side channel file */
             if (vmd->frames[i].type == 2)
             {
                 /* stretch the change window */
@@ -257,7 +246,7 @@ static int copy_blocks(vmd_dec_context *vmd, FILE *invmd_file, FILE *raw_file,
                 {
                     vmd->frames[i].length = 2 + PALETTE_COUNT * 3;
                     fwrite(vmd->buf, vmd->frames[i].length, 1, outvmd_file);
-                    find_subtitle_colors(vmd, &vmd->buf[2]);
+                    memcpy(vmd->palette, &vmd->buf[2], PALETTE_COUNT * 3);
                 }
 
                 /* raw encoding method */
@@ -276,12 +265,10 @@ static int copy_blocks(vmd_dec_context *vmd, FILE *invmd_file, FILE *raw_file,
                 subtitle_count = 0;
                 while (subtitles)
                 {
-                    if (subtitle_count == 0)
-                        subtitle_pixel = vmd->bg_index;
-                    else if (subtitle_count == 1)
-                        subtitle_pixel = vmd->fg_index;
-                    else
-                        printf("HELP! more than 2 subtitle layers\n");
+                    subtitle_pixel = find_nearest_color(vmd,
+                        (subtitles->color >>  8) & 0xFF,
+                        (subtitles->color >> 16) & 0xFF,
+                        (subtitles->color >> 24) & 0xFF);
                     subtitle_count++;
                     for (y = 0; y < subtitles->h; y++)
                     {
@@ -312,7 +299,6 @@ static int copy_blocks(vmd_dec_context *vmd, FILE *invmd_file, FILE *raw_file,
                     return 0;
                 }
             }
-#endif
         }
     }
 
