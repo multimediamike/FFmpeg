@@ -265,10 +265,12 @@ static int copy_blocks(vmd_dec_context *vmd, FILE *invmd_file, FILE *raw_file,
                 subtitle_count = 0;
                 while (subtitles)
                 {
+                    /* palette components are only 6 bits, so shift an extra 2
+                     * bits off each component */
                     subtitle_pixel = find_nearest_color(vmd,
-                        (subtitles->color >>  8) & 0xFF,
-                        (subtitles->color >> 16) & 0xFF,
-                        (subtitles->color >> 24) & 0xFF);
+                        (subtitles->color >> 10) & 0xFF,
+                        (subtitles->color >> 18) & 0xFF,
+                        (subtitles->color >> 26) & 0xFF);
                     subtitle_count++;
                     for (y = 0; y < subtitles->h; y++)
                     {
