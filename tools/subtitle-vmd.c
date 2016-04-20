@@ -27,6 +27,7 @@
 #define FRAME_RECORD_SIZE 16
 #define PALETTE_COUNT 256
 #define SUBTITLE_THRESHOLD 0x70
+#define FRAMES_NEEDED 4
 
 typedef struct
 {
@@ -60,8 +61,8 @@ typedef struct
     uint8_t *buf;
     int size;
 
-    uint8_t *frame;
-    uint8_t *prev_frame;
+    uint8_t *frame_array[FRAMES_NEEDED];
+    int cur_frame_index;
     int frame_size;
 
     ASS_Library *ass_lib;
@@ -186,8 +187,9 @@ static int load_and_copy_vmd_header(vmd_dec_context *vmd, FILE *invmd_file, FILE
     /* allocate stuff based on new information */
     vmd->buf = malloc(max_length);
     vmd->frame_size = vmd->width * vmd->height;
-    vmd->prev_frame = malloc(vmd->frame_size);
-    vmd->frame = malloc(vmd->frame_size);
+    for (i = 0; i < FRAMES_NEEDED; i++)
+        vmd->frame_array[i] = malloc(vmd->frame_size);
+    vmd->cur_frame_index = 0;
 
     /* success */
     return 1;
@@ -204,6 +206,10 @@ static int copy_blocks(vmd_dec_context *vmd, FILE *invmd_file, FILE *raw_file,
     uint8_t subtitle_pixel;
     uint8_t *frame_ptr;
     uint8_t *subtitle_ptr;
+    uint8_t *cur_frame;
+    uint8_t *prev_frame;
+    uint8_t *diff_frame;
+    uint8_t *enc_buffer;
 
     i = 0;
     for (b = 0; b < vmd->block_count; b++)
@@ -254,9 +260,12 @@ static int copy_blocks(vmd_dec_context *vmd, FILE *invmd_file, FILE *raw_file,
                 vmd->frames[i].length++;
 
                 /* grab the corresponding frame from the side channel file */
-                fread(vmd->frame, vmd->frame_size, 1, raw_file);
+                cur_frame = vmd->frame_array[vmd->cur_frame_index];
+                prev_frame = vmd->frame_array[!vmd->cur_frame_index];
+                vmd->cur_frame_index = !vmd->cur_frame_index;
+                fread(cur_frame, vmd->frame_size, 1, raw_file);
 
-#if 1
+#if 0
                 /* ask library for the subtitle for this timestamp */
                 subtitles = ass_render_frame(vmd->ass_renderer, vmd->ass_track,
                     b * 100, &detect_change);
@@ -275,7 +284,7 @@ static int copy_blocks(vmd_dec_context *vmd, FILE *invmd_file, FILE *raw_file,
                     for (y = 0; y < subtitles->h; y++)
                     {
                         subtitle_ptr = &subtitles->bitmap[y * subtitles->stride];
-                        frame_ptr = &vmd->frame[(subtitles->dst_y + y) * vmd->width + subtitles->dst_x];
+                        frame_ptr = &cur_frame[(subtitles->dst_y + y) * vmd->width + subtitles->dst_x];
                         for (x = 0; x < subtitles->w; x++, frame_ptr++, subtitle_ptr++)
                         {
                             if (*subtitle_ptr >= SUBTITLE_THRESHOLD)
@@ -287,7 +296,7 @@ static int copy_blocks(vmd_dec_context *vmd, FILE *invmd_file, FILE *raw_file,
 #endif
 
                 /* write the raw frame to the output file */
-                fwrite(vmd->frame, vmd->frame_size, 1, outvmd_file);
+                fwrite(cur_frame, vmd->frame_size, 1, outvmd_file);
 
                 /* adjust length */
                 vmd->frames[i].length += vmd->frame_size;
@@ -367,7 +376,7 @@ static int write_new_toc(vmd_dec_context *vmd, FILE *outvmd_file)
     buf[3] = (toc_offset >> 24) & 0xFF;
     if (fwrite(buf, sizeof(uint32_t), 1, outvmd_file) != 1)
     {
-        printf("failed to new ToC offset\n");
+        printf("failed to write new ToC offset\n");
         return 0;
     }
 
@@ -390,6 +399,7 @@ int main(int argc, char *argv[])
     int raw_frame_count;
     int raw_width;
     int raw_height;
+    int i;
 
     /* validate the number of arguments */
     if (argc != 5)
@@ -463,8 +473,20 @@ int main(int argc, char *argv[])
     if (!write_new_toc(&vmd, outvmd_file))
         return 1;
 
+    /* finished with files */
     fclose(invmd_file);
     fclose(outvmd_file);
+
+    /* clean up */
+    for (i = 0; i < FRAMES_NEEDED; i++)
+        free(vmd.frame_array[i]);
+    free(vmd.blocks);
+    free(vmd.frames);
+    free(vmd.buf);
+
+    ass_free_track(vmd.ass_track);
+    ass_renderer_done(vmd.ass_renderer);
+    ass_library_done(vmd.ass_lib);
 
     return 0;
 }
