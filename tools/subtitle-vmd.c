@@ -28,6 +28,7 @@
 #define PALETTE_COUNT 256
 #define SUBTITLE_THRESHOLD 0x70
 #define VMD_MAX_RUN 128
+#define MILLISECONDS_PER_FRAME 100
 
 typedef struct
 {
@@ -266,7 +267,7 @@ static int compress_frame_method_1(vmd_dec_context *vmd)
     i = 0;
     for (y = 0; y < vmd->height; y++)
     {
-        row_ptr = &cur_frame[y * vmd->width];
+        row_ptr = &vmd->diff_frame[y * vmd->width];
 
         /* initialize run */
         length_position = i;
@@ -274,12 +275,12 @@ static int compress_frame_method_1(vmd_dec_context *vmd)
         if (row_ptr[0] == 0)
         {
             zero_run = 1;
-            vmd->enc_buffer[i++] = 0x80;
+            vmd->enc_buffer[i++] = 0x00;
         }
         else
         {
             zero_run = 0;
-            vmd->enc_buffer[i++] = 0x00;
+            vmd->enc_buffer[i++] = 0x80;
             vmd->enc_buffer[i++] = row_ptr[0];
         }
 
@@ -306,10 +307,10 @@ static int compress_frame_method_1(vmd_dec_context *vmd)
                 length_position = i;
                 current_run = 1;
                 if (zero_run)
-                    vmd->enc_buffer[i++] = 0x80;
+                    vmd->enc_buffer[i++] = 0x00;
                 else
                 {
-                    vmd->enc_buffer[i++] = 0x00;
+                    vmd->enc_buffer[i++] = 0x80;
                     vmd->enc_buffer[i++] = row_ptr[x];
                 }
             }
@@ -394,7 +395,7 @@ static int copy_blocks(vmd_dec_context *vmd, FILE *invmd_file, FILE *raw_file,
                 fread(cur_frame, vmd->frame_size, 1, raw_file);
 
                 /* draw the subtitle */
-                subtitle_frame(vmd, b * 100);
+                subtitle_frame(vmd, b * MILLISECONDS_PER_FRAME);
 
                 /* first frame is always raw */
                 if (first_frame)
@@ -406,6 +407,7 @@ static int copy_blocks(vmd_dec_context *vmd, FILE *invmd_file, FILE *raw_file,
                 }
                 else
                 {
+                    /* perform the interframe compression */
                     compressed_size = compress_frame_method_1(vmd);
                     if (compressed_size == -1)
                     {
