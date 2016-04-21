@@ -286,6 +286,10 @@ static int compress_frame_method_1(vmd_dec_context *vmd)
 
         for (x = 1; x < vmd->width; x++)
         {
+            /* encoding buffer is overflowing; encode the raw frame */
+            if (i+5 >= vmd->frame_size)
+                return -1;
+
             /* close the current run if type changes or the run max is hit */
             if ((current_run == VMD_MAX_RUN) ||
                 (!row_ptr[x] != zero_run))
@@ -298,10 +302,6 @@ static int compress_frame_method_1(vmd_dec_context *vmd)
                  * was not due to a max run condition) */
                 if (current_run < VMD_MAX_RUN)
                     zero_run ^= 1;
-
-                /* encoding buffer is overflowing; encode the raw frame */
-                if (i+2 >= vmd->frame_size)
-                    return -1;
 
                 /* initialize new run */
                 length_position = i;
@@ -319,13 +319,7 @@ static int compress_frame_method_1(vmd_dec_context *vmd)
                 /* continue on the current run */
                 current_run++;
                 if (!zero_run)
-                {
-                    /* encoding buffer is overflowing; encode the raw frame */
-                    if (i >= vmd->frame_size)
-                        return -1;
-
                     vmd->enc_buffer[i++] = row_ptr[x];
-                }
             }
         }
 
