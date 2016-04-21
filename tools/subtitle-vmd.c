@@ -245,7 +245,8 @@ static int compress_frame_method_1(vmd_dec_context *vmd)
 {
     uint8_t *cur_frame;
     uint8_t *prev_frame;
-    uint8_t *row_ptr;
+    uint8_t *diff_ptr;
+    uint8_t *cur_ptr;
     int i;
     int x;
     int y;
@@ -261,18 +262,19 @@ static int compress_frame_method_1(vmd_dec_context *vmd)
         if (cur_frame[i] == prev_frame[i])
             vmd->diff_frame[i] = 0;
         else
-            vmd->diff_frame[i] = cur_frame[i];
+            vmd->diff_frame[i] = 1;
 
     /* iterate through lines and find runs */
     i = 0;
     for (y = 0; y < vmd->height; y++)
     {
-        row_ptr = &vmd->diff_frame[y * vmd->width];
+        diff_ptr = &vmd->diff_frame[y * vmd->width];
+        cur_ptr = &cur_frame[y * vmd->width];
 
         /* initialize run */
         length_position = i;
         current_run = 1;
-        if (row_ptr[0] == 0)
+        if (diff_ptr[0] == 0)
         {
             zero_run = 1;
             vmd->enc_buffer[i++] = 0x00;
@@ -281,7 +283,7 @@ static int compress_frame_method_1(vmd_dec_context *vmd)
         {
             zero_run = 0;
             vmd->enc_buffer[i++] = 0x80;
-            vmd->enc_buffer[i++] = row_ptr[0];
+            vmd->enc_buffer[i++] = cur_ptr[0];
         }
 
         for (x = 1; x < vmd->width; x++)
@@ -292,7 +294,7 @@ static int compress_frame_method_1(vmd_dec_context *vmd)
 
             /* close the current run if type changes or the run max is hit */
             if ((current_run == VMD_MAX_RUN) ||
-                (!row_ptr[x] != zero_run))
+                (!diff_ptr[x] != zero_run))
             {
                 /* jump back to the run length in the encoding stream and
                  * write the length (minus 1) */
@@ -300,7 +302,7 @@ static int compress_frame_method_1(vmd_dec_context *vmd)
 
                 /* flip the run type if run type changed (i.e., the closed run
                  * was not due to a max run condition) */
-                if (current_run < VMD_MAX_RUN)
+                if (!diff_ptr[x] != zero_run)
                     zero_run ^= 1;
 
                 /* initialize new run */
@@ -311,7 +313,7 @@ static int compress_frame_method_1(vmd_dec_context *vmd)
                 else
                 {
                     vmd->enc_buffer[i++] = 0x80;
-                    vmd->enc_buffer[i++] = row_ptr[x];
+                    vmd->enc_buffer[i++] = cur_ptr[x];
                 }
             }
             else
@@ -319,7 +321,7 @@ static int compress_frame_method_1(vmd_dec_context *vmd)
                 /* continue on the current run */
                 current_run++;
                 if (!zero_run)
-                    vmd->enc_buffer[i++] = row_ptr[x];
+                    vmd->enc_buffer[i++] = cur_ptr[x];
             }
         }
 
