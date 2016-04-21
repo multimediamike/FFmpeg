@@ -27,7 +27,7 @@
 #define FRAME_RECORD_SIZE 16
 #define PALETTE_COUNT 256
 #define SUBTITLE_THRESHOLD 0x70
-#define FRAMES_NEEDED 4
+#define VMD_MAX_RUN 128
 
 typedef struct
 {
@@ -61,7 +61,9 @@ typedef struct
     uint8_t *buf;
     int size;
 
-    uint8_t *frame_array[FRAMES_NEEDED];
+    uint8_t *frame_array[2];
+    uint8_t *diff_frame;
+    uint8_t *enc_buffer;
     int cur_frame_index;
     int frame_size;
 
@@ -187,31 +189,163 @@ static int load_and_copy_vmd_header(vmd_dec_context *vmd, FILE *invmd_file, FILE
     /* allocate stuff based on new information */
     vmd->buf = malloc(max_length);
     vmd->frame_size = vmd->width * vmd->height;
-    for (i = 0; i < FRAMES_NEEDED; i++)
+    for (i = 0; i < 2; i++)
         vmd->frame_array[i] = malloc(vmd->frame_size);
+    vmd->diff_frame = malloc(vmd->frame_size);
+    vmd->enc_buffer = malloc(vmd->frame_size);
     vmd->cur_frame_index = 0;
 
     /* success */
     return 1;
 }
 
+static void subtitle_frame(vmd_dec_context *vmd, int timestamp)
+{
+    uint8_t *cur_frame;
+    ASS_Image *subtitles;
+    int detect_change;
+    uint8_t subtitle_pixel;
+    int x, y;
+    uint8_t *frame_ptr;
+    uint8_t *subtitle_ptr;
+
+    cur_frame = vmd->frame_array[vmd->cur_frame_index];
+    /* ask library for the subtitle for this timestamp */
+    subtitles = ass_render_frame(vmd->ass_renderer, vmd->ass_track,
+        timestamp, &detect_change);
+
+    /* render the list of subtitles onto the decoded frame */
+    while (subtitles)
+    {
+        /* palette components are only 6 bits, so shift an extra 2
+         * bits off each component */
+        subtitle_pixel = find_nearest_color(vmd,
+            (subtitles->color >> 10) & 0xFF,
+            (subtitles->color >> 18) & 0xFF,
+            (subtitles->color >> 26) & 0xFF);
+        for (y = 0; y < subtitles->h; y++)
+        {
+            subtitle_ptr = &subtitles->bitmap[y * subtitles->stride];
+            frame_ptr = &cur_frame[(subtitles->dst_y + y) * vmd->width + subtitles->dst_x];
+            for (x = 0; x < subtitles->w; x++, frame_ptr++, subtitle_ptr++)
+            {
+                if (*subtitle_ptr >= SUBTITLE_THRESHOLD)
+                    *frame_ptr = subtitle_pixel;
+            }
+        }
+        subtitles = subtitles->next;
+    }
+}
+
+/* Returns the size of the compressed data in vmd->enc_buffer. If the
+ * algorithm couldn't achieve better compression that raw encoding, the
+ * function returns -1. */
+static int compress_frame_method_1(vmd_dec_context *vmd)
+{
+    uint8_t *cur_frame;
+    uint8_t *prev_frame;
+    uint8_t *row_ptr;
+    int i;
+    int x;
+    int y;
+    int length_position;
+    int zero_run;
+    int current_run;
+
+    cur_frame = vmd->frame_array[vmd->cur_frame_index];
+    prev_frame = vmd->frame_array[!vmd->cur_frame_index];
+
+    /* compute diff frame */
+    for (i = 0; i < vmd->frame_size; i++)
+        if (cur_frame[i] == prev_frame[i])
+            vmd->diff_frame[i] = 0;
+        else
+            vmd->diff_frame[i] = cur_frame[i];
+
+    /* iterate through lines and find runs */
+    i = 0;
+    for (y = 0; y < vmd->height; y++)
+    {
+        row_ptr = &cur_frame[y * vmd->width];
+
+        /* initialize run */
+        length_position = i;
+        current_run = 1;
+        if (row_ptr[0] == 0)
+        {
+            zero_run = 1;
+            vmd->enc_buffer[i++] = 0x80;
+        }
+        else
+        {
+            zero_run = 0;
+            vmd->enc_buffer[i++] = 0x00;
+            vmd->enc_buffer[i++] = row_ptr[0];
+        }
+
+        for (x = 1; x < vmd->width; x++)
+        {
+            /* close the current run if type changes or the run max is hit */
+            if ((current_run == VMD_MAX_RUN) ||
+                (!row_ptr[x] != zero_run))
+            {
+                /* jump back to the run length in the encoding stream and
+                 * write the length (minus 1) */
+                vmd->enc_buffer[length_position] += (current_run - 1);
+
+                /* flip the run type if run type changed (i.e., the closed run
+                 * was not due to a max run condition) */
+                if (current_run < VMD_MAX_RUN)
+                    zero_run ^= 1;
+
+                /* encoding buffer is overflowing; encode the raw frame */
+                if (i+2 >= vmd->frame_size)
+                    return -1;
+
+                /* initialize new run */
+                length_position = i;
+                current_run = 1;
+                if (zero_run)
+                    vmd->enc_buffer[i++] = 0x80;
+                else
+                {
+                    vmd->enc_buffer[i++] = 0x00;
+                    vmd->enc_buffer[i++] = row_ptr[x];
+                }
+            }
+            else
+            {
+                /* continue on the current run */
+                current_run++;
+                if (!zero_run)
+                {
+                    /* encoding buffer is overflowing; encode the raw frame */
+                    if (i >= vmd->frame_size)
+                        return -1;
+
+                    vmd->enc_buffer[i++] = row_ptr[x];
+                }
+            }
+        }
+
+        /* close the final run of this row */
+        vmd->enc_buffer[length_position] += (current_run - 1);
+    }
+
+    return i;
+}
+
 static int copy_blocks(vmd_dec_context *vmd, FILE *invmd_file, FILE *raw_file,
     FILE *outvmd_file, int raw_frame_count)
 {
     int b, f, i;
-    int x, y;
-    ASS_Image *subtitles;
-    int detect_change;
-    int subtitle_count;
-    uint8_t subtitle_pixel;
-    uint8_t *frame_ptr;
-    uint8_t *subtitle_ptr;
     uint8_t *cur_frame;
-    uint8_t *prev_frame;
-    uint8_t *diff_frame;
-    uint8_t *enc_buffer;
+    int first_frame;
+    int compressed_size;
+    uint8_t compression_method;
 
     i = 0;
+    first_frame = 1;
     for (b = 0; b < vmd->block_count; b++)
     {
         /* seek to the start of the block in the input VMD */
@@ -255,51 +389,44 @@ static int copy_blocks(vmd_dec_context *vmd, FILE *invmd_file, FILE *raw_file,
                     memcpy(vmd->palette, &vmd->buf[2], PALETTE_COUNT * 3);
                 }
 
-                /* raw encoding method */
-                fputc(2, outvmd_file);
-                vmd->frames[i].length++;
-
                 /* grab the corresponding frame from the side channel file */
                 cur_frame = vmd->frame_array[vmd->cur_frame_index];
-                prev_frame = vmd->frame_array[!vmd->cur_frame_index];
-                vmd->cur_frame_index = !vmd->cur_frame_index;
                 fread(cur_frame, vmd->frame_size, 1, raw_file);
 
-#if 0
-                /* ask library for the subtitle for this timestamp */
-                subtitles = ass_render_frame(vmd->ass_renderer, vmd->ass_track,
-                    b * 100, &detect_change);
+                /* draw the subtitle */
+                subtitle_frame(vmd, b * 100);
 
-                /* render the list of subtitles onto the decoded frame */
-                subtitle_count = 0;
-                while (subtitles)
+                /* first frame is always raw */
+                if (first_frame)
                 {
-                    /* palette components are only 6 bits, so shift an extra 2
-                     * bits off each component */
-                    subtitle_pixel = find_nearest_color(vmd,
-                        (subtitles->color >> 10) & 0xFF,
-                        (subtitles->color >> 18) & 0xFF,
-                        (subtitles->color >> 26) & 0xFF);
-                    subtitle_count++;
-                    for (y = 0; y < subtitles->h; y++)
-                    {
-                        subtitle_ptr = &subtitles->bitmap[y * subtitles->stride];
-                        frame_ptr = &cur_frame[(subtitles->dst_y + y) * vmd->width + subtitles->dst_x];
-                        for (x = 0; x < subtitles->w; x++, frame_ptr++, subtitle_ptr++)
-                        {
-                            if (*subtitle_ptr >= SUBTITLE_THRESHOLD)
-                                *frame_ptr = subtitle_pixel;
-                        }
-                    }
-                    subtitles = subtitles->next;
+                    first_frame = 0;
+                    compression_method = 2;
+                    memcpy(vmd->enc_buffer, cur_frame, vmd->frame_size);
+                    compressed_size = vmd->frame_size;
                 }
-#endif
+                else
+                {
+                    compressed_size = compress_frame_method_1(vmd);
+                    if (compressed_size == -1)
+                    {
+                        compression_method = 2;
+                        memcpy(vmd->enc_buffer, cur_frame, vmd->frame_size);
+                        compressed_size = vmd->frame_size;
+                    }
+                    else
+                        compression_method = 1;
+                }
 
-                /* write the raw frame to the output file */
-                fwrite(cur_frame, vmd->frame_size, 1, outvmd_file);
+                /* record the compression method */
+                fputc(compression_method, outvmd_file);
+                vmd->frames[i].length++;
 
-                /* adjust length */
-                vmd->frames[i].length += vmd->frame_size;
+                /* write the frame data */
+                fwrite(vmd->enc_buffer, compressed_size, 1, outvmd_file);
+                vmd->frames[i].length += compressed_size;
+
+                /* swap the current and previous frames */
+                vmd->cur_frame_index = !vmd->cur_frame_index;
             }
             else
             {
@@ -478,8 +605,10 @@ int main(int argc, char *argv[])
     fclose(outvmd_file);
 
     /* clean up */
-    for (i = 0; i < FRAMES_NEEDED; i++)
+    for (i = 0; i < 2; i++)
         free(vmd.frame_array[i]);
+    free(vmd.diff_frame);
+    free(vmd.enc_buffer);
     free(vmd.blocks);
     free(vmd.frames);
     free(vmd.buf);
