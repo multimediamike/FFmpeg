@@ -49,6 +49,10 @@ static int load_and_copy_rbt_header(rbt_dec_context *rbt, FILE *inrbt_file, FILE
     uint8_t *padding;
     int i;
     int max_frame_size;
+    int first_palette_index;
+    int palette_count;
+    int palette_type;
+    int palette_index;
 
     fseek(inrbt_file, 0, SEEK_SET);
     fseek(outrbt_file, 0, SEEK_SET);
@@ -101,6 +105,18 @@ static int load_and_copy_rbt_header(rbt_dec_context *rbt, FILE *inrbt_file, FILE
     {
         printf("problem writing palette\n");
         return 0;
+    }
+    /* load the palette into the internal context */
+    memset(rbt->palette, 0, PALETTE_COUNT * 3);
+    first_palette_index = palette_chunk[25];
+    palette_count = LE_16(&palette_chunk[29]);
+    palette_type = palette_chunk[32];
+    palette_index = (palette_type == 0) ? 38 : 37;
+    for (i = first_palette_index; i < first_palette_index + palette_count; i++)
+    {
+        rbt->palette[i*3+0] = palette_chunk[palette_index++];
+        rbt->palette[i*3+1] = palette_chunk[palette_index++];
+        rbt->palette[i*3+2] = palette_chunk[palette_index++];
     }
     free(palette_chunk);
 
@@ -202,7 +218,7 @@ static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file
         y = LE_16(&rbt->frame_load_buffer[14]);
         compressed_size = LE_16(&rbt->frame_load_buffer[16]);
         fragment_count = LE_16(&rbt->frame_load_buffer[18]);
-printf("frame %d: %d, %dx%d, (%d, %d), %d %d\n", i, scale, width, height, x, y, compressed_size, fragment_count);
+printf("frame %d: %d, %dx%d, (%d, %d), %d, %d\n", i, scale, width, height, x, y, compressed_size, fragment_count);
 
         if (fwrite(rbt->frame_load_buffer, rbt->frame_sizes[i], 1, outrbt_file) != 1)
         {
