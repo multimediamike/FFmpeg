@@ -1,5 +1,6 @@
 /*
  * subtitle-rbt.c
+ *  by Mike Melanson (mike -at- multimedia.cx)
  *
  * build with this command:
  *   gcc -g -Wall subtitle-rbt.c -o subtitle-rbt -lm -lass
@@ -19,6 +20,79 @@
                              (((uint8_t*)(x))[2]  << 16) |  \
                              (((uint8_t*)(x))[1]  <<  8) |  \
                               ((uint8_t*)(x))[0])
+
+/*********************************************************************/
+
+/* Bit readers and writers */
+
+typedef struct
+{
+    uint8_t *bytestream;
+    int bytestream_size;
+    int index;
+    uint32_t bits;
+    int bits_in_buffer;
+} get_bits_context;
+
+static inline void reload_bits(get_bits_context *gb)
+{
+    while (gb->bits_in_buffer <= 24)
+    {
+        gb->bits |= (gb->bytestream[gb->index++] << (24 - gb->bits_in_buffer));
+        gb->bits_in_buffer += 8;
+        if (gb->index >= gb->bytestream_size)
+        {
+            printf("Help! bytestream overflow while reading bits\n");
+            return;
+        }
+    }
+}
+
+static void init_get_bits(get_bits_context *gb, uint8_t *bytestream, int size)
+{
+    gb->bytestream = malloc(size);
+    memcpy(gb->bytestream, bytestream, size);
+    gb->bytestream_size = size;
+    gb->index = 0;
+    gb->bits = 0;
+    gb->bits_in_buffer = 0;
+
+    reload_bits(gb);
+}
+
+/* read bits without consuming them from the stream */
+static int view_bits(get_bits_context *gb, int count)
+{
+    if (count >= 24)
+        return -1;
+    if (gb->bits_in_buffer < count)
+        reload_bits(gb);
+    return (gb->bits >> (32 - count));
+}
+
+/* read and consume bits from the stream */
+static int read_bits(get_bits_context *gb, int count)
+{
+    int value;
+
+    if (count >= 24)
+        return -1;
+
+    value = view_bits(gb, count);
+    gb->bits <<= count;
+    gb->bits_in_buffer -= count;
+
+    return value;
+}
+
+static void delete_get_bits(get_bits_context *gb)
+{
+    free(gb->bytestream);
+}
+
+/*********************************************************************/
+
+/* RBT functions */
 
 #define PALETTE_COUNT 256
 #define RBT_HEADER_SIZE 60
@@ -239,6 +313,20 @@ int main(int argc, char *argv[])
     char *outrbt_filename;
     FILE *outrbt_file;
     rbt_dec_context rbt;
+
+    /* testing the bit functions */
+#if 1
+    int i;
+    uint8_t bytestream[] = { 0x55, 0xAA, 0x00, 0xAA, 0x55, 0x77, 0xFF, 0x00 };
+    get_bits_context gb;
+    init_get_bits(&gb, bytestream, 8);
+    for (i = 1; i < 8; i++)
+    {
+        printf("view %d bits: %d\n", i, view_bits(&gb, i));
+        printf("read %d bits: %d\n", i, read_bits(&gb, i));
+    }
+    delete_get_bits(&gb);
+#endif
 
     /* validate the number of arguments */
     if (argc != 4)
