@@ -30,6 +30,7 @@ typedef struct
     int width;
     int height;
     int frame_count;
+    int audio_chunk_size;
     uint8_t palette[PALETTE_COUNT * 3];
     uint16_t *frame_sizes;
     uint8_t *frame_load_buffer;
@@ -67,6 +68,7 @@ static int load_and_copy_rbt_header(rbt_dec_context *rbt, FILE *inrbt_file, FILE
     }
 
     rbt->version = LE_16(&header[6]);
+    rbt->audio_chunk_size = LE_16(&header[8]);
     rbt->frame_count = LE_16(&header[14]);
 
     /* transfer the unknown data, if it's there */
@@ -153,7 +155,7 @@ static int load_and_copy_rbt_header(rbt_dec_context *rbt, FILE *inrbt_file, FILE
     }
 
     /* copy over padding */
-    padding_size = 0x800 - (ftell(inrbt_file) & 0x4CC);
+    padding_size = 0x800 - (ftell(inrbt_file) & 0x7FF);
     if (padding_size)
     {
         padding = malloc(padding_size);
@@ -176,14 +178,32 @@ static int load_and_copy_rbt_header(rbt_dec_context *rbt, FILE *inrbt_file, FILE
 static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file)
 {
     int i;
+    int scale;
+    int width;
+    int height;
+    int x;
+    int y;
+    int compressed_size;
+    int fragment_count;
 
     for (i = 0; i < rbt->frame_count; i++)
     {
+        /* read the entire frame (includes audio and video) */
         if (fread(rbt->frame_load_buffer, rbt->frame_sizes[i], 1, inrbt_file) != 1)
         {
             printf("problem reading frame %d\n", i);
             return 0;
         }
+
+        scale = rbt->frame_load_buffer[3];
+        width = LE_16(&rbt->frame_load_buffer[4]);
+        height = LE_16(&rbt->frame_load_buffer[6]);
+        x = LE_16(&rbt->frame_load_buffer[12]);
+        y = LE_16(&rbt->frame_load_buffer[14]);
+        compressed_size = LE_16(&rbt->frame_load_buffer[16]);
+        fragment_count = LE_16(&rbt->frame_load_buffer[18]);
+printf("frame %d: %d, %dx%d, (%d, %d), %d %d\n", i, scale, width, height, x, y, compressed_size, fragment_count);
+
         if (fwrite(rbt->frame_load_buffer, rbt->frame_sizes[i], 1, outrbt_file) != 1)
         {
             printf("problem writing frame %d\n", i);
