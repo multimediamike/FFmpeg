@@ -32,6 +32,7 @@ typedef struct
     int frame_count;
     uint8_t palette[PALETTE_COUNT * 3];
     uint16_t *frame_sizes;
+    uint8_t *frame_load_buffer;
 } rbt_dec_context;
 
 static int load_and_copy_rbt_header(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file)
@@ -46,6 +47,7 @@ static int load_and_copy_rbt_header(rbt_dec_context *rbt, FILE *inrbt_file, FILE
     off_t padding_size;
     uint8_t *padding;
     int i;
+    int max_frame_size;
 
     fseek(inrbt_file, 0, SEEK_SET);
     fseek(outrbt_file, 0, SEEK_SET);
@@ -128,10 +130,14 @@ static int load_and_copy_rbt_header(rbt_dec_context *rbt, FILE *inrbt_file, FILE
 
     /* load the frame sizes */
     rbt->frame_sizes = malloc(rbt->frame_count * sizeof(uint16_t));
+    max_frame_size = 0;
     for (i = 0; i < rbt->frame_count; i++)
     {
         rbt->frame_sizes[i] = LE_16(&frame_info[i*2]);
+        if (rbt->frame_sizes[i] > max_frame_size)
+            max_frame_size = rbt->frame_sizes[i];
     }
+    rbt->frame_load_buffer = malloc(max_frame_size);
     free(frame_info);
 
     /* transfer the unknown table(s) */
@@ -170,16 +176,15 @@ static int load_and_copy_rbt_header(rbt_dec_context *rbt, FILE *inrbt_file, FILE
 static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file)
 {
     int i;
-    uint8_t frame[64000];  /* this should be the largest seen frame size */
 
     for (i = 0; i < rbt->frame_count; i++)
     {
-        if (fread(frame, rbt->frame_sizes[i], 1, inrbt_file) != 1)
+        if (fread(rbt->frame_load_buffer, rbt->frame_sizes[i], 1, inrbt_file) != 1)
         {
             printf("problem reading frame %d\n", i);
             return 0;
         }
-        if (fwrite(frame, rbt->frame_sizes[i], 1, outrbt_file) != 1)
+        if (fwrite(rbt->frame_load_buffer, rbt->frame_sizes[i], 1, outrbt_file) != 1)
         {
             printf("problem writing frame %d\n", i);
             return 0;
@@ -243,6 +248,10 @@ int main(int argc, char *argv[])
     /* finished with files */
     fclose(inrbt_file);
     fclose(outrbt_file);
+
+    /* clean up */
+    free(rbt.frame_load_buffer);
+    free(rbt.frame_sizes);
 
     return 0;
 }
