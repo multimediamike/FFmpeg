@@ -324,7 +324,8 @@ static int get_lzs_back_ref_length(get_bits_context *gb)
     return value;
 }
 
-static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file)
+static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file,
+    int origin_x, int origin_y, int frame_width, int frame_height)
 {
     int i;
     int j;
@@ -470,6 +471,10 @@ int main(int argc, char *argv[])
     char *outrbt_filename;
     FILE *outrbt_file;
     rbt_dec_context rbt;
+    int origin_x;
+    int origin_y;
+    int frame_width;
+    int frame_height;
 
     /* testing the bit functions */
 #if 0
@@ -486,14 +491,18 @@ int main(int argc, char *argv[])
 #endif
 
     /* validate the number of arguments */
-    if (argc != 4)
+    if (argc != 8)
     {
-        printf("USAGE: subtitle-rbt <subtitles.ass> <in.rbt> <out.rbt>\n");
+        printf("USAGE: subtitle-rbt <subtitles.ass> <in.rbt> <out.rbt> <origin X> <origin Y> <width> <height>\n");
         return 1;
     }
     subtitle_filename = argv[1];
     inrbt_filename = argv[2];
     outrbt_filename = argv[3];
+    origin_x = atoi(argv[4]);
+    origin_y = atoi(argv[5]);
+    frame_width = atoi(argv[6]);
+    frame_height = atoi(argv[7]);
 
     /* verify that the specified input files are valid */
     subtitle_file = fopen(subtitle_filename, "r");
@@ -523,7 +532,8 @@ int main(int argc, char *argv[])
         return 1;
 
     /* rewrite the frames */
-    if (!copy_frames(&rbt, inrbt_file, outrbt_file))
+    if (!copy_frames(&rbt, inrbt_file, outrbt_file, origin_x, origin_y,
+        frame_width, frame_height))
         return 1;
 
     /* finished with files */
