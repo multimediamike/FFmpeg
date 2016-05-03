@@ -23,7 +23,7 @@
 
 /*********************************************************************/
 
-/* Bit readers and writers */
+/* Bit reader stuff */
 
 typedef struct
 {
@@ -85,6 +85,52 @@ static int read_bits(get_bits_context *gb, int count)
 static void delete_get_bits(get_bits_context *gb)
 {
     free(gb->bytestream);
+}
+
+/*********************************************************************/
+
+/* Bit writer stuff */
+
+#define MAX_PUT_BITS_BYTES 63000
+typedef struct
+{
+    uint8_t bytes[MAX_PUT_BITS_BYTES];
+    int byte_index;
+    uint32_t bit_buffer;
+    int bits_buffered;
+} put_bits_context;
+
+static put_bits_context *init_put_bits()
+{
+    put_bits_context *pb;
+
+    pb = malloc(sizeof(put_bits_context));
+    memset(pb->bytes, 0, MAX_PUT_BITS_BYTES);
+    pb->byte_index = 0;
+    pb->bit_buffer = 0;
+    pb->bits_buffered = 0;
+
+    return pb;
+}
+
+static void put_bits(put_bits_context *pb, int bits, int count)
+{
+    pb->bit_buffer <<= count;
+    pb->bit_buffer |= (bits & (~(0xFFFFFFFF << count)));
+    pb->bits_buffered += count;
+
+    while (pb->bits_buffered >= 8)
+    {
+        pb->bytes[pb->byte_index++] = pb->bit_buffer >> (pb->bits_buffered - 8);
+        pb->bit_buffer &= (~(0xFFFFFFFF << (pb->bits_buffered - 8)));
+        pb->bits_buffered -= 8;
+    }
+}
+
+static void put_bits_flush(put_bits_context *pb)
+{
+    if (pb->bits_buffered > 0)
+        pb->bytes[pb->byte_index++] = pb->bit_buffer << (8 - pb->bits_buffered);
 }
 
 /*********************************************************************/
@@ -497,15 +543,34 @@ int main(int argc, char *argv[])
     /* testing the bit functions */
 #if 0
     int i;
-    uint8_t bytestream[] = { 0x55, 0xAA, 0x00, 0xAA, 0x55, 0x77, 0xFF, 0x00 };
+    uint8_t bytestream[] = { 0x55, 0xAA, 0x00, 0xAA, 0x55, 0x77, 0xFF, 0x1B, 0x70, 0x8F };
+    int bytestream_size = 10;
     get_bits_context gb;
-    init_get_bits(&gb, bytestream, 8);
-    for (i = 1; i < 8; i++)
+    put_bits_context *pb;
+    int bits;
+
+    init_get_bits(&gb, bytestream, bytestream_size);
+    pb = init_put_bits();
+
+    for (i = 1; i <= 12; i++)
     {
-        printf("view %d bits: %d\n", i, view_bits(&gb, i));
+        bits = view_bits(&gb, i);
+        printf("view %d bits: %d\n", i, bits);
         printf("read %d bits: %d\n", i, read_bits(&gb, i));
+        put_bits(pb, bits, i);
     }
+    put_bits_flush(pb);
+
+    printf("original bytestream:\n");
+    for (i = 0; i < bytestream_size; i++)
+        printf(" %02X", bytestream[i]);
+    printf("\nnewbytestream:\n");
+    for (i = 0; i < pb->byte_index; i++)
+        printf(" %02X", pb->bytes[i]);
+    printf("\n");
+
     delete_get_bits(&gb);
+    free(pb);
 #endif
 
     /* validate the number of arguments */
