@@ -41,10 +41,7 @@ static inline void reload_bits(get_bits_context *gb)
         gb->bits |= (gb->bytestream[gb->index++] << (24 - gb->bits_in_buffer));
         gb->bits_in_buffer += 8;
         if (gb->index >= gb->bytestream_size)
-        {
-            printf("Help! bytestream overflow while reading bits\n");
             return;
-        }
     }
 }
 
@@ -97,6 +94,45 @@ static void delete_get_bits(get_bits_context *gb)
 #define PALETTE_COUNT 256
 #define RBT_HEADER_SIZE 60
 #define UNKNOWN_TABLE_SIZE (1024+512)
+
+/* VLC table */
+#define VLC_SIZE 4
+static struct
+{
+    int count;
+    int value;
+} lzs_vlc_table[] =
+{
+    /* code length = 2 bits; value = 2 */
+    /* 0000 */ { 2, 2 },
+    /* 0001 */ { 2, 2 },
+    /* 0010 */ { 2, 2 },
+    /* 0011 */ { 2, 2 },
+
+    /* code length = 2 bits; value = 3 */
+    /* 0100 */ { 2, 3 },
+    /* 0101 */ { 2, 3 },
+    /* 0110 */ { 2, 3 },
+    /* 0111 */ { 2, 3 },
+
+    /* code length = 2 bits; value = 4 */
+    /* 1000 */ { 2, 4 },
+    /* 1001 */ { 2, 4 },
+    /* 1010 */ { 2, 4 },
+    /* 1011 */ { 2, 4 },
+
+    /* code length = 4 bits; value = 5 */
+    /* 1100 */ { 4, 5 },
+
+    /* code length = 4 bits; value = 6 */
+    /* 1101 */ { 4, 6 },
+
+    /* code length = 4 bits; value = 7 */
+    /* 1110 */ { 4, 7 },
+
+    /* special case */
+    /* 1111 */ { 4, 8 }
+};
 
 typedef struct
 {
@@ -265,9 +301,33 @@ static int load_and_copy_rbt_header(rbt_dec_context *rbt, FILE *inrbt_file, FILE
     return 1;
 }
 
+static int get_lzs_back_ref_length(get_bits_context *gb)
+{
+    int vlc;
+    int count;
+    int value;
+
+    vlc = view_bits(gb, VLC_SIZE);
+    count = lzs_vlc_table[vlc].count;
+    value = lzs_vlc_table[vlc].value;
+
+    read_bits(gb, count);
+    if (value == 8)
+    {
+        while (vlc == 0xF)
+        {
+            vlc = read_bits(gb, VLC_SIZE);
+            value += vlc;
+        }
+    }
+
+    return value;
+}
+
 static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file)
 {
     int i;
+    int j;
     int scale;
     int width;
     int height;
@@ -275,6 +335,20 @@ static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file
     int y;
     int compressed_size;
     int fragment_count;
+    int decoded_size;
+    uint8_t *decoded_frame;
+    int fragment;
+    int fragment_compressed_size;
+    int fragment_decompressed_size;
+    int compression_type;
+    int index;
+    int out_index;
+    get_bits_context gb;
+    int back_ref_offset_type;
+    int back_ref_offset;
+    int back_ref_length;
+    int back_ref_start;
+    int back_ref_end;
 
     for (i = 0; i < rbt->frame_count; i++)
     {
@@ -292,8 +366,91 @@ static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file
         y = LE_16(&rbt->frame_load_buffer[14]);
         compressed_size = LE_16(&rbt->frame_load_buffer[16]);
         fragment_count = LE_16(&rbt->frame_load_buffer[18]);
+        decoded_size = width * height;
 printf("frame %d: %d, %dx%d, (%d, %d), %d, %d\n", i, scale, width, height, x, y, compressed_size, fragment_count);
 
+        /* decode the frame */
+        decoded_frame = malloc(decoded_size);
+        index = 24;
+        out_index = 0;
+        for (fragment = 0; fragment < fragment_count; fragment++)
+        {
+            fragment_compressed_size = LE_32(&rbt->frame_load_buffer[index]);
+            index += 4;
+            fragment_decompressed_size = LE_32(&rbt->frame_load_buffer[index]);
+            index += 4;
+            compression_type = LE_16(&rbt->frame_load_buffer[index]);
+            index += 2;
+printf(" fragment %d: %d, %d, %d\n", fragment, fragment_compressed_size, fragment_decompressed_size, compression_type);
+
+            if (compression_type == 0)
+            {
+                init_get_bits(&gb, &rbt->frame_load_buffer[index],
+                    fragment_compressed_size);
+
+                while (out_index < fragment_decompressed_size)
+                {
+                    if (read_bits(&gb, 1))
+                    {
+                        /* decode back reference offset type */
+                        back_ref_offset_type = read_bits(&gb, 1);
+
+                        /* back reference offset is 7 or 11 bits */
+                        back_ref_offset = read_bits(&gb,
+                            (back_ref_offset_type) ? 7 : 11);
+
+                        /* get the length of the back reference */
+                        back_ref_length = get_lzs_back_ref_length(&gb);
+                        back_ref_start = out_index - back_ref_offset;
+                        back_ref_end = back_ref_start + back_ref_length;
+
+                        /* copy the back reference, byte by byte */
+//printf("  copy %d pixels from offset -%d; out_index = %d\n", back_ref_length, back_ref_offset, out_index + back_ref_length);
+                        for (j = back_ref_start; j < back_ref_end; j++)
+                            decoded_frame[out_index++] = decoded_frame[j];
+                    }
+                    else
+                    {
+uint8_t b = read_bits(&gb, 8);
+//printf("  single byte: %02X, out_index = %d\n", b, out_index + 1);
+                        /* read raw pixel byte */
+//                        decoded_frame[out_index++] = read_bits(&gb, 8) & 0xFF;
+                        decoded_frame[out_index++] = b;
+                    }
+                }
+
+                if (out_index > fragment_decompressed_size)
+                    printf("Help! frame decode overflow\n");
+
+                delete_get_bits(&gb);
+            }
+        }
+
+if (0)
+{
+  FILE *outfile;
+  char filename[20];
+  uint8_t bytes[3];
+  int p;
+  uint8_t pixel;
+
+  sprintf(filename, "frame-%03d.pnm", i);
+  outfile = fopen(filename, "wb");
+  fprintf(outfile, "P6\n%d %d\n255\n", width, height);
+  for (p = 0; p < fragment_decompressed_size; p++)
+  {
+    pixel = decoded_frame[p];
+    bytes[0] = rbt->palette[pixel*3+0];
+    bytes[1] = rbt->palette[pixel*3+1];
+    bytes[2] = rbt->palette[pixel*3+2];
+    fwrite(bytes, 3, 1, outfile);
+  }
+  fclose(outfile);
+}
+
+        free(decoded_frame);
+
+        /* write the entire frame (for now) */
         if (fwrite(rbt->frame_load_buffer, rbt->frame_sizes[i], 1, outrbt_file) != 1)
         {
             printf("problem writing frame %d\n", i);
@@ -315,7 +472,7 @@ int main(int argc, char *argv[])
     rbt_dec_context rbt;
 
     /* testing the bit functions */
-#if 1
+#if 0
     int i;
     uint8_t bytestream[] = { 0x55, 0xAA, 0x00, 0xAA, 0x55, 0x77, 0xFF, 0x00 };
     get_bits_context gb;
