@@ -325,15 +325,15 @@ static int get_lzs_back_ref_length(get_bits_context *gb)
 }
 
 static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file,
-    int origin_x, int origin_y, int frame_width, int frame_height)
+    int origin_x, int origin_y, int window_width, int window_height)
 {
     int i;
     int j;
     int scale;
     int width;
     int height;
-    int x;
-    int y;
+    int frame_x;
+    int frame_y;
     int compressed_size;
     int fragment_count;
     int decoded_size;
@@ -345,11 +345,19 @@ static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file
     int index;
     int out_index;
     get_bits_context gb;
+
     int back_ref_offset_type;
     int back_ref_offset;
     int back_ref_length;
     int back_ref_start;
     int back_ref_end;
+
+    uint8_t *full_window;
+    int full_window_size;
+    int y;
+
+    full_window_size = window_width * window_height;
+    full_window = malloc(full_window_size);
 
     for (i = 0; i < rbt->frame_count; i++)
     {
@@ -363,12 +371,12 @@ static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file
         scale = rbt->frame_load_buffer[3];
         width = LE_16(&rbt->frame_load_buffer[4]);
         height = LE_16(&rbt->frame_load_buffer[6]);
-        x = LE_16(&rbt->frame_load_buffer[12]);
-        y = LE_16(&rbt->frame_load_buffer[14]);
+        frame_x = LE_16(&rbt->frame_load_buffer[12]);
+        frame_y = LE_16(&rbt->frame_load_buffer[14]);
         compressed_size = LE_16(&rbt->frame_load_buffer[16]);
         fragment_count = LE_16(&rbt->frame_load_buffer[18]);
         decoded_size = width * height;
-printf("frame %d: %d, %dx%d, (%d, %d), %d, %d\n", i, scale, width, height, x, y, compressed_size, fragment_count);
+printf("frame %d: %d, %dx%d, (%d, %d), %d, %d\n", i, scale, width, height, frame_x, frame_y, compressed_size, fragment_count);
 
         /* decode the frame */
         decoded_frame = malloc(decoded_size);
@@ -427,6 +435,16 @@ uint8_t b = read_bits(&gb, 8);
             }
         }
 
+        /* transfer the image onto the frame window */
+        memset(full_window, 0xFF, full_window_size);
+        index = 0;
+        for (y = 0; y < height; y++)
+        {
+            out_index = window_width * (frame_y + y) + frame_x;
+            memcpy(&full_window[out_index], &decoded_frame[index], width);
+            index += width;
+        }
+
 if (0)
 {
   FILE *outfile;
@@ -437,10 +455,10 @@ if (0)
 
   sprintf(filename, "frame-%03d.pnm", i);
   outfile = fopen(filename, "wb");
-  fprintf(outfile, "P6\n%d %d\n255\n", width, height);
-  for (p = 0; p < fragment_decompressed_size; p++)
+  fprintf(outfile, "P6\n%d %d\n255\n", window_width, window_height);
+  for (p = 0; p < full_window_size; p++)
   {
-    pixel = decoded_frame[p];
+    pixel = full_window[p];
     bytes[0] = rbt->palette[pixel*3+0];
     bytes[1] = rbt->palette[pixel*3+1];
     bytes[2] = rbt->palette[pixel*3+2];
