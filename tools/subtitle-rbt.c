@@ -188,7 +188,10 @@ typedef struct
     int frame_count;
     int audio_chunk_size;
     uint8_t palette[PALETTE_COUNT * 3];
-    uint16_t *frame_sizes;
+    off_t video_frame_size_table_offset;
+    uint8_t *video_frame_size_table;
+    off_t frame_size_table_offset;
+    uint8_t *frame_size_table;
     uint8_t *frame_load_buffer;
 } rbt_dec_context;
 
@@ -199,11 +202,11 @@ static int load_and_copy_rbt_header(rbt_dec_context *rbt, FILE *inrbt_file, FILE
     uint8_t *palette_chunk;
     int unknown_chunk_size;
     uint8_t *unknown_chunk;
-    uint8_t *frame_info;
     uint8_t unknown_table[UNKNOWN_TABLE_SIZE];
     off_t padding_size;
     uint8_t *padding;
     int i;
+    int frame_size;
     int max_frame_size;
     int first_palette_index;
     int palette_count;
@@ -276,43 +279,43 @@ static int load_and_copy_rbt_header(rbt_dec_context *rbt, FILE *inrbt_file, FILE
     }
     free(palette_chunk);
 
-    frame_info = malloc(rbt->frame_count * sizeof(uint16_t));
-
-    /* load the first frame table (2 bytes per frame) */
-    if (fread(frame_info, rbt->frame_count * sizeof(uint16_t), 1, inrbt_file) != 1)
+    /* copy the video frame size table (2 bytes per frame), as a placeholder */
+    rbt->video_frame_size_table = malloc(rbt->frame_count * sizeof(uint16_t));
+    if (fread(rbt->video_frame_size_table, rbt->frame_count * sizeof(uint16_t), 1, inrbt_file) != 1)
     {
         printf("problem reading frame table\n");
         return 0;
     }
-    if (fwrite(frame_info, rbt->frame_count * sizeof(uint16_t), 1, outrbt_file) != 1)
+    rbt->video_frame_size_table_offset = ftell(outrbt_file);
+    if (fwrite(rbt->video_frame_size_table, rbt->frame_count * sizeof(uint16_t), 1, outrbt_file) != 1)
     {
         printf("problem writing frame table\n");
         return 0;
     }
 
-    /* load the second frame table (2 bytes per frame) */
-    if (fread(frame_info, rbt->frame_count * sizeof(uint16_t), 1, inrbt_file) != 1)
+    /* copy the frame size table (2 bytes per frame), as a placeholder */
+    rbt->frame_size_table = malloc(rbt->frame_count * sizeof(uint16_t));
+    if (fread(rbt->frame_size_table, rbt->frame_count * sizeof(uint16_t), 1, inrbt_file) != 1)
     {
         printf("problem reading frame table\n");
         return 0;
     }
-    if (fwrite(frame_info, rbt->frame_count * sizeof(uint16_t), 1, outrbt_file) != 1)
+    rbt->frame_size_table_offset = ftell(outrbt_file);
+    if (fwrite(rbt->frame_size_table, rbt->frame_count * sizeof(uint16_t), 1, outrbt_file) != 1)
     {
         printf("problem writing frame table\n");
         return 0;
     }
 
-    /* load the frame sizes */
-    rbt->frame_sizes = malloc(rbt->frame_count * sizeof(uint16_t));
+    /* find the max frame size */
     max_frame_size = 0;
     for (i = 0; i < rbt->frame_count; i++)
     {
-        rbt->frame_sizes[i] = LE_16(&frame_info[i*2]);
-        if (rbt->frame_sizes[i] > max_frame_size)
-            max_frame_size = rbt->frame_sizes[i];
+        frame_size = LE_16(&rbt->frame_size_table[i*2]);
+        if (frame_size > max_frame_size)
+            max_frame_size = frame_size;
     }
     rbt->frame_load_buffer = malloc(max_frame_size);
-    free(frame_info);
 
     /* transfer the unknown table(s) */
     if (fread(unknown_table, UNKNOWN_TABLE_SIZE, 1, inrbt_file) != 1)
@@ -391,6 +394,8 @@ static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file
     int index;
     int out_index;
     get_bits_context gb;
+    int frame_size;
+    int video_frame_size;
 
     int back_ref_offset_type;
     int back_ref_offset;
@@ -408,7 +413,9 @@ static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file
     for (i = 0; i < rbt->frame_count; i++)
     {
         /* read the entire frame (includes audio and video) */
-        if (fread(rbt->frame_load_buffer, rbt->frame_sizes[i], 1, inrbt_file) != 1)
+        frame_size = LE_16(&rbt->frame_size_table[i*2]);
+        video_frame_size = LE_16(&rbt->video_frame_size_table[i*2]);
+        if (fread(rbt->frame_load_buffer, frame_size, 1, inrbt_file) != 1)
         {
             printf("problem reading frame %d\n", i);
             return 0;
@@ -516,12 +523,14 @@ if (0)
         free(decoded_frame);
 
         /* write the entire frame (for now) */
-        if (fwrite(rbt->frame_load_buffer, rbt->frame_sizes[i], 1, outrbt_file) != 1)
+        if (fwrite(rbt->frame_load_buffer, frame_size, 1, outrbt_file) != 1)
         {
             printf("problem writing frame %d\n", i);
             return 0;
         }
     }
+
+    free(full_window);
 
     return 1;
 }
@@ -625,7 +634,8 @@ int main(int argc, char *argv[])
 
     /* clean up */
     free(rbt.frame_load_buffer);
-    free(rbt.frame_sizes);
+    free(rbt.video_frame_size_table);
+    free(rbt.frame_size_table);
 
     return 0;
 }
