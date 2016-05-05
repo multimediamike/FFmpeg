@@ -628,6 +628,12 @@ int main(int argc, char *argv[])
         frame_width, frame_height))
         return 1;
 
+    /* write the modified frame size tables back to the file */
+    fseek(outrbt_file, rbt.video_frame_size_table_offset, SEEK_SET);
+    fwrite(rbt.video_frame_size_table, rbt.frame_count * sizeof(uint16_t), 1, outrbt_file);
+    fseek(outrbt_file, rbt.frame_size_table_offset, SEEK_SET);
+    fwrite(rbt.frame_size_table, rbt.frame_count * sizeof(uint16_t), 1, outrbt_file);
+
     /* finished with files */
     fclose(inrbt_file);
     fclose(outrbt_file);
