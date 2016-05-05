@@ -100,15 +100,20 @@ typedef struct
     int bits_buffered;
 } put_bits_context;
 
+static void reset_put_bits(put_bits_context *pb)
+{
+    memset(pb->bytes, 0, MAX_PUT_BITS_BYTES);
+    pb->byte_index = 0;
+    pb->bit_buffer = 0;
+    pb->bits_buffered = 0;
+}
+
 static put_bits_context *init_put_bits()
 {
     put_bits_context *pb;
 
     pb = malloc(sizeof(put_bits_context));
-    memset(pb->bytes, 0, MAX_PUT_BITS_BYTES);
-    pb->byte_index = 0;
-    pb->bit_buffer = 0;
-    pb->bits_buffered = 0;
+    reset_put_bits(pb);
 
     return pb;
 }
