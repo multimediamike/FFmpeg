@@ -130,6 +130,12 @@ static void put_bits(put_bits_context *pb, int bits, int count)
         pb->bit_buffer &= (~(0xFFFFFFFF << (pb->bits_buffered - 8)));
         pb->bits_buffered -= 8;
     }
+
+    if (pb->byte_index >= MAX_PUT_BITS_BYTES)
+    {
+        printf("HELP! Bit overflow\n");
+        exit(1);
+    }
 }
 
 static void put_bits_flush(put_bits_context *pb)
@@ -378,6 +384,109 @@ static int get_lzs_back_ref_length(get_bits_context *gb)
     return value;
 }
 
+static void compress_window(put_bits_context *pb, uint8_t *full_window,
+    int full_window_stride,
+    int window_top, int window_bottom, int window_left, int window_right)
+{
+    int last_pixel;
+    int run_size;
+    int x;
+    int y;
+    int start_index;
+    int end_index;
+    int encode_last_run;
+
+    last_pixel = full_window[0];
+    run_size = 1;
+    for (y = window_top; y <= window_bottom; y++)
+    {
+        start_index = y * full_window_stride + window_left;
+        if (y == window_top)
+            start_index += 1;
+        end_index = y * full_window_stride + window_right;
+        if (y == window_bottom)
+            encode_last_run = 1;
+        else
+            encode_last_run = 0;
+        for (x = start_index; x < end_index; x++)
+        {
+if (y - window_top == 51)
+  printf(".... (%d: %d): %02X\n", x % full_window_stride - window_left, y - window_top, full_window[x]);
+            if (!encode_last_run && full_window[x] == last_pixel)
+                run_size++;
+            else
+            {
+printf("@(%d, %d):", x % full_window_stride - window_left, y - window_top);
+                if (run_size == 1)
+                {
+printf("  encoding single pixel: 0x%02X\n", last_pixel);
+                    /* encode a 0 bit followed by raw pixel byte */
+                    put_bits(pb, 0, 1);
+                    put_bits(pb, last_pixel, 8);
+                }
+                else if (run_size == 2)
+                {
+printf("  encoding a double run of pixel: 0x%02X\n", last_pixel);
+                    /* encode a 0 bit followed by raw pixel byte */
+                    put_bits(pb, 0, 1);
+                    put_bits(pb, last_pixel, 8);
+                    put_bits(pb, 0, 1);
+                    put_bits(pb, last_pixel, 8);
+                }
+                else
+                {
+printf("  encoding %d-length run of pixel: 0x%02X\n", run_size, last_pixel);
+                    /* encode a 0 bit followed by raw pixel byte */
+                    put_bits(pb, 0, 1);
+                    put_bits(pb, last_pixel, 8);
+                    run_size--;
+                    /* encode a run: a 1 bit, followed by a back reference
+                     * offset (-1), followed by a length */
+                    put_bits(pb, 1, 1);
+                    put_bits(pb, 1, 1);  /* 1 = 7-bit offset */
+                    put_bits(pb, 1, 7);
+                    if (run_size <= 4)
+                    {
+                        /* lengths 2, 3, and 4 are 2 bits */
+                        put_bits(pb, run_size - 2, 2);
+                    }
+                    else if (run_size <= 7)
+                    {
+                        /* lengths 5, 6, and 7 are 4 bits */
+                        put_bits(pb, run_size + 7, 4);
+                    }
+                    else
+                    {
+                        /* arbitrary length; start by encoding 0xF which
+                         * stands in for an initial version of 8 */
+                        put_bits(pb, 0xF, 4);
+                        run_size -= 8;
+
+                        /* encode blocks of 4 bits until run_size is 0 */
+                        while (run_size > 0)
+                        {
+                            if (run_size >= 15)
+                            {
+                                put_bits(pb, 0xF, 4);
+                                run_size -= 0xF;
+                            }
+                            else
+                            {
+                                put_bits(pb, run_size, 4);
+                                run_size = 0;
+                            }
+                        }
+                    }
+                }
+
+                last_pixel = full_window[x];
+                run_size = 1;
+            }
+        }
+    }
+    put_bits_flush(pb);
+}
+
 static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file,
     int origin_x, int origin_y, int window_width, int window_height)
 {
@@ -401,6 +510,7 @@ static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file
     get_bits_context gb;
     int frame_size;
     int video_frame_size;
+    int audio_frame_size;
 
     int back_ref_offset_type;
     int back_ref_offset;
@@ -411,15 +521,25 @@ static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file
     uint8_t *full_window;
     int full_window_size;
     int y;
+    int window_top;
+    int window_bottom;
+    int window_left;
+    int window_right;
+    int window_size;
+
+    put_bits_context *pb;
 
     full_window_size = window_width * window_height;
     full_window = malloc(full_window_size);
+    pb = init_put_bits();
 
     for (i = 0; i < rbt->frame_count; i++)
     {
         /* read the entire frame (includes audio and video) */
         frame_size = LE_16(&rbt->frame_size_table[i*2]);
         video_frame_size = LE_16(&rbt->video_frame_size_table[i*2]);
+        audio_frame_size = frame_size - video_frame_size;
+printf("frame_size = %d, video = %d, audio = %d\n", frame_size, video_frame_size, audio_frame_size);
         if (fread(rbt->frame_load_buffer, frame_size, 1, inrbt_file) != 1)
         {
             printf("problem reading frame %d\n", i);
@@ -503,7 +623,22 @@ uint8_t b = read_bits(&gb, 8);
             index += width;
         }
 
-if (0)
+        /* write the subtitle */
+
+        /* figure out the smallest change window */
+        window_top = frame_y;
+        window_bottom = frame_y + height;
+        window_left = frame_x;
+        window_right = frame_x + width;
+        window_size = (window_right - window_left) * (window_bottom - window_top);
+
+        /* compress the frame */
+        reset_put_bits(pb);
+        compress_window(pb, full_window, window_width, window_top,
+            window_bottom, window_left, window_right);
+        printf(" compressed frame = %d bytes\n", pb->byte_index);
+
+if (1)
 {
   FILE *outfile;
   char filename[20];
@@ -513,6 +648,7 @@ if (0)
 
   sprintf(filename, "frame-%03d.pnm", i);
   outfile = fopen(filename, "wb");
+#if 0
   fprintf(outfile, "P6\n%d %d\n255\n", window_width, window_height);
   for (p = 0; p < full_window_size; p++)
   {
@@ -522,17 +658,94 @@ if (0)
     bytes[2] = rbt->palette[pixel*3+2];
     fwrite(bytes, 3, 1, outfile);
   }
+#else
+  fprintf(outfile, "P6\n%d %d\n255\n", width, height);
+  for (p = 0; p < width * height; p++)
+  {
+    pixel = decoded_frame[p];
+    bytes[0] = rbt->palette[pixel*3+0];
+    bytes[1] = rbt->palette[pixel*3+1];
+    bytes[2] = rbt->palette[pixel*3+2];
+    fwrite(bytes, 3, 1, outfile);
+  }
+#endif
   fclose(outfile);
 }
 
         free(decoded_frame);
 
+#if 0
         /* write the entire frame (for now) */
         if (fwrite(rbt->frame_load_buffer, frame_size, 1, outrbt_file) != 1)
         {
             printf("problem writing frame %d\n", i);
             return 0;
         }
+#else
+        /* update the frame header */
+        /* width */
+        rbt->frame_load_buffer[4] = (window_right - window_left) & 0xFF;
+        rbt->frame_load_buffer[5] = (window_right - window_left) >> 8;
+        /* height */
+        rbt->frame_load_buffer[6] = (window_bottom - window_top) & 0xFF;
+        rbt->frame_load_buffer[7] = (window_bottom - window_top) >> 8;
+        /* origin X */
+        rbt->frame_load_buffer[12] = window_left & 0xFF;
+        rbt->frame_load_buffer[13] = window_left >> 8;
+        /* origin Y */
+        rbt->frame_load_buffer[14] = window_top & 0xFF;
+        rbt->frame_load_buffer[15] = window_top >> 8;
+        /* fragment payload size */
+        rbt->frame_load_buffer[16] = (pb->byte_index + 10) & 0xFF;
+        rbt->frame_load_buffer[17] = (pb->byte_index + 10) >> 8;
+        /* fragment count (1) */
+        rbt->frame_load_buffer[18] = 1;
+        rbt->frame_load_buffer[19] = 0;
+
+        /* update the fragment header */
+        /* compressed size */
+        rbt->frame_load_buffer[24 + 0] = (pb->byte_index >>  0) & 0xFF;
+        rbt->frame_load_buffer[24 + 1] = (pb->byte_index >>  8) & 0xFF;
+        rbt->frame_load_buffer[24 + 2] = (pb->byte_index >> 16) & 0xFF;
+        rbt->frame_load_buffer[24 + 3] = (pb->byte_index >> 24) & 0xFF;
+        /* decompressed size */
+        rbt->frame_load_buffer[24 + 4] = (window_size >>  0) & 0xFF;
+        rbt->frame_load_buffer[24 + 5] = (window_size >>  8) & 0xFF;
+        rbt->frame_load_buffer[24 + 6] = (window_size >> 16) & 0xFF;
+        rbt->frame_load_buffer[24 + 7] = (window_size >> 24) & 0xFF;
+        /* compression format 0 */
+        rbt->frame_load_buffer[24 + 8] = 0;
+        rbt->frame_load_buffer[24 + 9] = 0;
+
+        /* write the 24-byte frame header and the 10-byte fragment header */
+        if (fwrite(rbt->frame_load_buffer, 24 + 10, 1, outrbt_file) != 1)
+        {
+            printf("problem writing frame %d\n", i);
+            return 0;
+        }
+
+        /* write the new compressed frame data */
+        if (fwrite(pb->bytes, pb->byte_index, 1, outrbt_file) != 1)
+        {
+            printf("problem writing frame %d\n", i);
+            return 0;
+        }
+
+        /* write the audio data */
+        if (fwrite(&rbt->frame_load_buffer[video_frame_size], frame_size - video_frame_size, 1, outrbt_file) != 1)
+        {
+            printf("problem writing frame %d\n", i);
+            return 0;
+        }
+
+        /* update the table entries */
+        video_frame_size = pb->byte_index + 24 + 10;
+        frame_size = video_frame_size + audio_frame_size;
+        rbt->frame_size_table[i*2+0] = frame_size & 0xFF;
+        rbt->frame_size_table[i*2+1] = frame_size >> 8;
+        rbt->video_frame_size_table[i*2+0] = video_frame_size & 0xFF;
+        rbt->video_frame_size_table[i*2+1] = video_frame_size >> 8;
+#endif
     }
 
     free(full_window);
