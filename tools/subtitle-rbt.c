@@ -476,10 +476,10 @@ printf("  encoding %d-length run of pixel: 0x%02X\n", run_size, last_pixel);
                             }
                         }
                     }
-                }
 
-                last_pixel = full_window[x];
-                run_size = 1;
+                    last_pixel = full_window[x];
+                    run_size = 1;
+                }
 
                 /* this single x iteration was only here to close the final run */
                 if (y == window_bottom)
@@ -487,6 +487,12 @@ printf("  encoding %d-length run of pixel: 0x%02X\n", run_size, last_pixel);
             }
         }
     }
+
+    /* close the bitstream by encoding a back reference with length 0 */
+    put_bits(pb, 1, 1);  /* back reference run */
+    put_bits(pb, 1, 1);  /* 1 = 7-bit offset */
+    put_bits(pb, 0, 7);  /* length 0 */
+
     put_bits_flush(pb);
 }
 
