@@ -143,6 +143,11 @@ static void put_bits_flush(put_bits_context *pb)
         pb->bytes[pb->byte_index++] = pb->bit_buffer << (8 - pb->bits_buffered);
 }
 
+static void delete_put_bits(put_bits_context *pb)
+{
+    free(pb->bytes);
+}
+
 /*********************************************************************/
 
 /* RBT functions */
@@ -757,6 +762,7 @@ if (1)
 #endif
     }
 
+    delete_put_bits(pb);
     free(full_window);
 
     return 1;
