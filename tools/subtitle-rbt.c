@@ -38,10 +38,9 @@ static inline void reload_bits(get_bits_context *gb)
 {
     while (gb->bits_in_buffer <= 24)
     {
-        gb->bits |= (gb->bytestream[gb->index++] << (24 - gb->bits_in_buffer));
+        if (gb->index < gb->bytestream_size)
+            gb->bits |= (gb->bytestream[gb->index++] << (24 - gb->bits_in_buffer));
         gb->bits_in_buffer += 8;
-        if (gb->index >= gb->bytestream_size)
-            return;
     }
 }
 
