@@ -378,11 +378,12 @@ static int get_lzs_back_ref_length(get_bits_context *gb)
     read_bits(gb, count);
     if (value == 8)
     {
-        while (vlc == 0xF)
+        do
         {
             vlc = read_bits(gb, VLC_SIZE);
             value += vlc;
         }
+        while (vlc == 0xF);
     }
 
     return value;
@@ -467,7 +468,7 @@ printf("  encoding %d-length run of pixel: 0x%02X\n", run_size, last_pixel);
                         run_size -= 8;
 
                         /* encode blocks of 4 bits until run_size is 0 */
-                        while (run_size > 0)
+                        while (run_size >= 0)
                         {
                             if (run_size >= 15)
                             {
@@ -477,14 +478,14 @@ printf("  encoding %d-length run of pixel: 0x%02X\n", run_size, last_pixel);
                             else
                             {
                                 put_bits(pb, run_size, 4);
-                                run_size = 0;
+                                run_size = -1;
                             }
                         }
                     }
-
-                    last_pixel = full_window[x];
-                    run_size = 1;
                 }
+
+                last_pixel = full_window[x];
+                run_size = 1;
 
                 /* this single x iteration was only here to close the final run */
                 if (y == window_bottom)
