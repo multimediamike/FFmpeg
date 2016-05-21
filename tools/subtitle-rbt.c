@@ -155,6 +155,7 @@ static void delete_put_bits(put_bits_context *pb)
 #define PALETTE_COUNT 256
 #define RBT_HEADER_SIZE 60
 #define UNKNOWN_TABLE_SIZE (1024+512)
+#define SUBTITLE_THRESHOLD 0x70
 
 /* VLC table */
 #define VLC_SIZE 4
@@ -208,6 +209,11 @@ typedef struct
     off_t frame_size_table_offset;
     uint8_t *frame_size_table;
     uint8_t *frame_load_buffer;
+
+    /* subtitle library */
+    ASS_Library *ass_lib;
+    ASS_Renderer *ass_renderer;
+    ASS_Track *ass_track;
 } rbt_dec_context;
 
 static int load_and_copy_rbt_header(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file)
@@ -415,23 +421,21 @@ static void compress_window(put_bits_context *pb, uint8_t *full_window,
             encode_last_run = 0;
         for (x = start_index; x < end_index; x++)
         {
-if (y - window_top == 51)
-  printf(".... (%d: %d): %02X\n", x % full_window_stride - window_left, y - window_top, full_window[x]);
             if (!encode_last_run && full_window[x] == last_pixel)
                 run_size++;
             else
             {
-printf("@(%d, %d):", x % full_window_stride - window_left, y - window_top);
+//printf("@(%d, %d):", x % full_window_stride - window_left, y - window_top);
                 if (run_size == 1)
                 {
-printf("  encoding single pixel: 0x%02X\n", last_pixel);
+//printf("  encoding single pixel: 0x%02X\n", last_pixel);
                     /* encode a 0 bit followed by raw pixel byte */
                     put_bits(pb, 0, 1);
                     put_bits(pb, last_pixel, 8);
                 }
                 else if (run_size == 2)
                 {
-printf("  encoding a double run of pixel: 0x%02X\n", last_pixel);
+//printf("  encoding a double run of pixel: 0x%02X\n", last_pixel);
                     /* encode a 0 bit followed by raw pixel byte */
                     put_bits(pb, 0, 1);
                     put_bits(pb, last_pixel, 8);
@@ -440,7 +444,7 @@ printf("  encoding a double run of pixel: 0x%02X\n", last_pixel);
                 }
                 else
                 {
-printf("  encoding %d-length run of pixel: 0x%02X\n", run_size, last_pixel);
+//printf("  encoding %d-length run of pixel: 0x%02X\n", run_size, last_pixel);
                     /* encode a 0 bit followed by raw pixel byte */
                     put_bits(pb, 0, 1);
                     put_bits(pb, last_pixel, 8);
@@ -500,6 +504,82 @@ printf("  encoding %d-length run of pixel: 0x%02X\n", run_size, last_pixel);
     put_bits(pb, 0, 7);  /* length 0 */
 
     put_bits_flush(pb);
+}
+
+/* compute Euclidean distance between an RGB color and the desired target */
+static int compute_rgb_distance(int r1, int r2, int g1, int g2, int b1, int b2)
+{
+    return sqrt((r1 - r2) * (r1 - r2) +
+                (g1 - g2) * (g1 - g2) +
+                (b1 - b2) * (b1 - b2));
+}
+
+static uint8_t find_nearest_color(rbt_dec_context *rbt, int r, int g, int b)
+{
+    int i;
+    int nearest_distance;
+    int distance;
+    int rp;
+    int gp;
+    int bp;
+    uint8_t palette_index;
+
+    nearest_distance = 999999999;
+    palette_index = 0;
+    for (i = 0; i < 256; i++)
+    {
+        rp = rbt->palette[i * 3 + 0];
+        gp = rbt->palette[i * 3 + 1];
+        bp = rbt->palette[i * 3 + 2];
+        distance = compute_rgb_distance(r, rp, g, gp, b, bp);
+        if (distance < nearest_distance)
+        {
+            nearest_distance = distance;
+            palette_index = i;
+        }
+        /* can't get closer than 0; break early */
+        if (distance == 0)
+            break;
+    }
+
+    return palette_index;
+}
+
+static void subtitle_frame(rbt_dec_context *rbt, uint8_t *frame,
+    int width, int height, int timestamp)
+{
+    ASS_Image *subtitles;
+    int detect_change;
+    uint8_t subtitle_pixel;
+    int x, y;
+    uint8_t *frame_ptr;
+    uint8_t *subtitle_ptr;
+
+    /* ask library for the subtitle for this timestamp */
+    subtitles = ass_render_frame(rbt->ass_renderer, rbt->ass_track,
+        timestamp, &detect_change);
+
+    /* render the list of subtitles onto the decoded frame */
+    while (subtitles)
+    {
+        /* palette components are only 6 bits, so shift an extra 2
+         * bits off each component */
+        subtitle_pixel = find_nearest_color(rbt,
+            (subtitles->color >> 10) & 0xFF,
+            (subtitles->color >> 18) & 0xFF,
+            (subtitles->color >> 26) & 0xFF);
+        for (y = 0; y < subtitles->h; y++)
+        {
+            subtitle_ptr = &subtitles->bitmap[y * subtitles->stride];
+            frame_ptr = &frame[(subtitles->dst_y + y) * width + subtitles->dst_x];
+            for (x = 0; x < subtitles->w; x++, frame_ptr++, subtitle_ptr++)
+            {
+                if (*subtitle_ptr >= SUBTITLE_THRESHOLD)
+                    *frame_ptr = subtitle_pixel;
+            }
+        }
+        subtitles = subtitles->next;
+    }
 }
 
 static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file,
@@ -639,12 +719,13 @@ uint8_t b = read_bits(&gb, 8);
         }
 
         /* write the subtitle */
+        subtitle_frame(rbt, full_window, window_width, window_height, i * 10);
 
         /* figure out the smallest change window */
         window_top = frame_y;
-        window_bottom = frame_y + height;
-        window_left = frame_x;
-        window_right = frame_x + width;
+        window_bottom = window_height;
+        window_left = 0;
+        window_right = window_width;
         window_size = (window_right - window_left) * (window_bottom - window_top);
 
         /* compress the frame */
@@ -663,7 +744,7 @@ if (1)
 
   sprintf(filename, "frame-%03d.pnm", i);
   outfile = fopen(filename, "wb");
-#if 0
+#if 1
   fprintf(outfile, "P6\n%d %d\n255\n", window_width, window_height);
   for (p = 0; p < full_window_size; p++)
   {
@@ -780,8 +861,8 @@ int main(int argc, char *argv[])
     rbt_dec_context rbt;
     int origin_x;
     int origin_y;
-    int frame_width;
-    int frame_height;
+    int window_width;
+    int window_height;
 
     /* testing the bit functions */
 #if 0
@@ -827,8 +908,8 @@ int main(int argc, char *argv[])
     outrbt_filename = argv[3];
     origin_x = atoi(argv[4]);
     origin_y = atoi(argv[5]);
-    frame_width = atoi(argv[6]);
-    frame_height = atoi(argv[7]);
+    window_width = atoi(argv[6]);
+    window_height = atoi(argv[7]);
 
     /* verify that the specified input files are valid */
     subtitle_file = fopen(subtitle_filename, "r");
@@ -845,6 +926,13 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    /* initialize the subtitle support */
+    rbt.ass_lib = ass_library_init();
+    rbt.ass_renderer = ass_renderer_init(rbt.ass_lib);
+    rbt.ass_track = ass_read_file(rbt.ass_lib, subtitle_filename, "UTF-8");
+    ass_set_frame_size(rbt.ass_renderer, window_width, window_height);
+    ass_set_fonts(rbt.ass_renderer, NULL, NULL, 1, NULL, 1);
+
     /* open the output file */
     outrbt_file = fopen(outrbt_filename, "wb");
     if (!outrbt_file)
@@ -859,7 +947,7 @@ int main(int argc, char *argv[])
 
     /* rewrite the frames */
     if (!copy_frames(&rbt, inrbt_file, outrbt_file, origin_x, origin_y,
-        frame_width, frame_height))
+        window_width, window_height))
         return 1;
 
     /* write the modified frame size tables back to the file */
@@ -871,6 +959,11 @@ int main(int argc, char *argv[])
     /* finished with files */
     fclose(inrbt_file);
     fclose(outrbt_file);
+
+    /* clean up subtitle library */
+    ass_free_track(rbt.ass_track);
+    ass_renderer_done(rbt.ass_renderer);
+    ass_library_done(rbt.ass_lib);
 
     /* clean up */
     free(rbt.frame_load_buffer);
