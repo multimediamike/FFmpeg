@@ -209,12 +209,34 @@ typedef struct
     off_t frame_size_table_offset;
     uint8_t *frame_size_table;
     uint8_t *frame_load_buffer;
+    int dump_frames;
 
     /* subtitle library */
     ASS_Library *ass_lib;
     ASS_Renderer *ass_renderer;
     ASS_Track *ass_track;
 } rbt_dec_context;
+
+static void dump_pnm_file(char *filename, rbt_dec_context *rbt,
+    uint8_t *image, int width, int height)
+{
+    FILE *outfile;
+    uint8_t bytes[3];
+    int p;
+    uint8_t pixel;
+
+    outfile = fopen(filename, "wb");
+    fprintf(outfile, "P6\n%d %d\n255\n", width, height);
+    for (p = 0; p < width * height; p++)
+    {
+        pixel = image[p];
+        bytes[0] = rbt->palette[pixel*3+0];
+        bytes[1] = rbt->palette[pixel*3+1];
+        bytes[2] = rbt->palette[pixel*3+2];
+        fwrite(bytes, 3, 1, outfile);
+    }
+    fclose(outfile);
+}
 
 static int load_and_copy_rbt_header(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file)
 {
@@ -622,6 +644,8 @@ static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file
     int window_right;
     int window_size;
 
+    char filename[30];
+
     put_bits_context *pb;
 
     full_window_size = window_width * window_height;
@@ -708,6 +732,13 @@ uint8_t b = read_bits(&gb, 8);
             }
         }
 
+        if (rbt->dump_frames)
+        {
+            /* dump the original frame */
+            sprintf(filename, "original-frame-%03d.pnm", i);
+            dump_pnm_file(filename, rbt, decoded_frame, width, height);
+        }
+
         /* transfer the image onto the frame window */
         memset(full_window, 0xFF, full_window_size);
         index = 0;
@@ -734,39 +765,13 @@ uint8_t b = read_bits(&gb, 8);
             window_bottom, window_left, window_right);
         printf(" compressed frame = %d bytes\n", pb->byte_index);
 
-if (1)
-{
-  FILE *outfile;
-  char filename[20];
-  uint8_t bytes[3];
-  int p;
-  uint8_t pixel;
-
-  sprintf(filename, "frame-%03d.pnm", i);
-  outfile = fopen(filename, "wb");
-#if 1
-  fprintf(outfile, "P6\n%d %d\n255\n", window_width, window_height);
-  for (p = 0; p < full_window_size; p++)
-  {
-    pixel = full_window[p];
-    bytes[0] = rbt->palette[pixel*3+0];
-    bytes[1] = rbt->palette[pixel*3+1];
-    bytes[2] = rbt->palette[pixel*3+2];
-    fwrite(bytes, 3, 1, outfile);
-  }
-#else
-  fprintf(outfile, "P6\n%d %d\n255\n", width, height);
-  for (p = 0; p < width * height; p++)
-  {
-    pixel = decoded_frame[p];
-    bytes[0] = rbt->palette[pixel*3+0];
-    bytes[1] = rbt->palette[pixel*3+1];
-    bytes[2] = rbt->palette[pixel*3+2];
-    fwrite(bytes, 3, 1, outfile);
-  }
-#endif
-  fclose(outfile);
-}
+        if (rbt->dump_frames)
+        {
+            /* dump the frame plotted onto the full window prior to encoding,
+             * with subtitle */
+            sprintf(filename, "pre-encoding-frame-%03d.pnm", i);
+            dump_pnm_file(filename, rbt, full_window, window_width, window_height);
+        }
 
         free(decoded_frame);
 
@@ -898,9 +903,9 @@ int main(int argc, char *argv[])
 #endif
 
     /* validate the number of arguments */
-    if (argc != 8)
+    if (argc != 8 && argc != 9)
     {
-        printf("USAGE: subtitle-rbt <subtitles.ass> <in.rbt> <out.rbt> <origin X> <origin Y> <width> <height>\n");
+        printf("USAGE: subtitle-rbt <subtitles.ass> <in.rbt> <out.rbt> <origin X> <origin Y> <width> <height> [dump_frames]\n");
         return 1;
     }
     subtitle_filename = argv[1];
@@ -910,6 +915,9 @@ int main(int argc, char *argv[])
     origin_y = atoi(argv[5]);
     window_width = atoi(argv[6]);
     window_height = atoi(argv[7]);
+    rbt.dump_frames = 0;
+    if (argc == 9)
+        rbt.dump_frames = 1;
 
     /* verify that the specified input files are valid */
     subtitle_file = fopen(subtitle_filename, "r");
