@@ -671,6 +671,13 @@ static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file
         decoded_size = width * height;
 printf("frame %d: %d, %dx%d, (%d, %d), %d, %d\n", i, scale, width, height, frame_x, frame_y, compressed_size, fragment_count);
 
+        /* refuse to decode frames where scale factor is not 100% */
+        if (scale != 100)
+        {
+            printf("don't know how to handle frame scaling yet\n");
+            return 0;
+        }
+
         /* decode the frame */
         decoded_frame = malloc(decoded_size);
         index = 24;
@@ -716,9 +723,6 @@ printf(" fragment %d: %d, %d, %d\n", fragment, fragment_compressed_size, fragmen
                         decoded_frame[out_index++] = read_bits(&gb, 8) & 0xFF;
                     }
                 }
-
-                if (out_index > fragment_decompressed_size)
-                    printf("Help! frame decode overflow\n");
 
                 delete_get_bits(&gb);
             }
