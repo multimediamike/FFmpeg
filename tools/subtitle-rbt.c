@@ -156,6 +156,7 @@ static void delete_put_bits(put_bits_context *pb)
 #define RBT_HEADER_SIZE 60
 #define UNKNOWN_TABLE_SIZE (1024+512)
 #define SUBTITLE_THRESHOLD 0x70
+#define MILLISECONDS_PER_FRAME 100
 
 /* VLC table */
 #define VLC_SIZE 4
@@ -658,7 +659,7 @@ static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file
         frame_size = LE_16(&rbt->frame_size_table[i*2]);
         video_frame_size = LE_16(&rbt->video_frame_size_table[i*2]);
         audio_frame_size = frame_size - video_frame_size;
-printf("frame_size = %d, video = %d, audio = %d\n", frame_size, video_frame_size, audio_frame_size);
+//printf("frame_size = %d, video = %d, audio = %d\n", frame_size, video_frame_size, audio_frame_size);
         if (fread(rbt->frame_load_buffer, frame_size, 1, inrbt_file) != 1)
         {
             printf("problem reading frame %d\n", i);
@@ -750,7 +751,8 @@ uint8_t b = read_bits(&gb, 8);
         }
 
         /* write the subtitle */
-        subtitle_frame(rbt, full_window, window_width, window_height, i * 10);
+        subtitle_frame(rbt, full_window, window_width, window_height,
+            i * MILLISECONDS_PER_FRAME);
 
         /* figure out the smallest change window */
         window_top = frame_y;
@@ -763,7 +765,7 @@ uint8_t b = read_bits(&gb, 8);
         reset_put_bits(pb);
         compress_window(pb, full_window, window_width, window_top,
             window_bottom, window_left, window_right);
-        printf(" compressed frame = %d bytes\n", pb->byte_index);
+//        printf(" compressed frame = %d bytes\n", pb->byte_index);
 
         if (rbt->dump_frames)
         {
