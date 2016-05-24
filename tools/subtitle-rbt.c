@@ -731,6 +731,9 @@ uint8_t b = read_bits(&gb, 8);
 
                 delete_get_bits(&gb);
             }
+
+            /* next fragment */
+            index += fragment_compressed_size;
         }
 
         if (rbt->dump_frames)
