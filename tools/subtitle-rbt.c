@@ -609,9 +609,10 @@ static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file
     int scale;
     int width;
     int height;
+    int max_width;
+    int max_height;
     int frame_x;
     int frame_y;
-    int compressed_size;
     int fragment_count;
     int decoded_size;
     uint8_t *decoded_frame;
@@ -649,6 +650,9 @@ static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file
     full_window = malloc(full_window_size);
     pb = init_put_bits();
 
+    max_width = 0;
+    max_height = 0;
+
     for (i = 0; i < rbt->frame_count; i++)
     {
         /* read the entire frame (includes audio and video) */
@@ -663,20 +667,17 @@ static int copy_frames(rbt_dec_context *rbt, FILE *inrbt_file, FILE *outrbt_file
 
         scale = rbt->frame_load_buffer[3];
         width = LE_16(&rbt->frame_load_buffer[4]);
+        if (max_width < width)
+            max_width = width;
+        if (max_height < height)
+            max_height = height;
         height = LE_16(&rbt->frame_load_buffer[6]);
         frame_x = LE_16(&rbt->frame_load_buffer[12]);
         frame_y = LE_16(&rbt->frame_load_buffer[14]);
-        compressed_size = LE_16(&rbt->frame_load_buffer[16]);
         fragment_count = LE_16(&rbt->frame_load_buffer[18]);
         decoded_size = width * height;
-printf("frame %d: %d, %dx%d, (%d, %d), %d, %d\n", i, scale, width, height, frame_x, frame_y, compressed_size, fragment_count);
 
-        /* refuse to decode frames where scale factor is not 100% */
-        if (scale != 100)
-        {
-            printf("don't know how to handle frame scaling yet\n");
-            return 0;
-        }
+        printf("processing frame %d: %d%%, %dx%d, origin @ (%d, %d), %d fragments\n", i, scale, width, height, frame_x, frame_y, fragment_count);
 
         /* decode the frame */
         decoded_frame = malloc(decoded_size);
@@ -690,7 +691,6 @@ printf("frame %d: %d, %dx%d, (%d, %d), %d, %d\n", i, scale, width, height, frame
             index += 4;
             compression_type = LE_16(&rbt->frame_load_buffer[index]);
             index += 2;
-printf(" fragment %d: %d, %d, %d\n", fragment, fragment_compressed_size, fragment_decompressed_size, compression_type);
 
             if (compression_type == 0)
             {
@@ -838,6 +838,8 @@ printf(" fragment %d: %d, %d, %d\n", fragment, fragment_compressed_size, fragmen
         rbt->video_frame_size_table[i*2+0] = video_frame_size & 0xFF;
         rbt->video_frame_size_table[i*2+1] = video_frame_size >> 8;
     }
+
+    printf("maximum dimensions seen are %dx%d\n", max_width, max_height);
 
     delete_put_bits(pb);
     free(full_window);
