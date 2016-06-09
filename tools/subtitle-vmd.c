@@ -139,6 +139,12 @@ static int load_and_copy_vmd_header(vmd_dec_context *vmd, FILE *invmd_file, FILE
     toc_offset = LE_32(&vmd->header[812]);
     max_length = 0;
 
+    /* declare the load buffer to be the same size as the decode buffer */
+    vmd->header[796] = vmd->header[800];
+    vmd->header[797] = vmd->header[801];
+    vmd->header[798] = vmd->header[802];
+    vmd->header[799] = vmd->header[803];
+
     /* copy to the output */
     if (fwrite(vmd->header, VMD_HEADER_SIZE, 1, outvmd_file) != 1)
     {
