@@ -120,6 +120,7 @@ static int load_and_copy_vmd_header(vmd_dec_context *vmd, FILE *invmd_file, FILE
     uint32_t toc_offset;
     unsigned char buf[FRAME_RECORD_SIZE];
     uint32_t max_length;
+    int max_frame_size;
 
     fseek(invmd_file, 0, SEEK_SET);
     fseek(outvmd_file, 0, SEEK_SET);
@@ -138,12 +139,6 @@ static int load_and_copy_vmd_header(vmd_dec_context *vmd, FILE *invmd_file, FILE
     vmd->frames_per_block = LE_16(&vmd->header[18]);
     toc_offset = LE_32(&vmd->header[812]);
     max_length = 0;
-
-    /* declare the load buffer to be the same size as the decode buffer */
-    vmd->header[796] = vmd->header[800];
-    vmd->header[797] = vmd->header[801];
-    vmd->header[798] = vmd->header[802];
-    vmd->header[799] = vmd->header[803];
 
     /* copy to the output */
     if (fwrite(vmd->header, VMD_HEADER_SIZE, 1, outvmd_file) != 1)
@@ -201,6 +196,14 @@ static int load_and_copy_vmd_header(vmd_dec_context *vmd, FILE *invmd_file, FILE
     vmd->diff_frame = malloc(vmd->frame_size);
     vmd->enc_buffer = malloc(vmd->frame_size);
     vmd->cur_frame_index = 0;
+
+    /* declare the load buffer to be large enough for a raw frame, plus
+     * header byte, plus palette change (2 + 256*3) */
+    max_frame_size = vmd->frame_size + 1 + 2 + PALETTE_COUNT * 3;
+    vmd->header[796] = (max_frame_size >>  0) & 0xFF;
+    vmd->header[797] = (max_frame_size >>  8) & 0xFF;
+    vmd->header[798] = (max_frame_size >> 16) & 0xFF;
+    vmd->header[799] = (max_frame_size >> 24) & 0xFF;
 
     /* success */
     return 1;
@@ -592,6 +595,7 @@ int main(int argc, char *argv[])
     if ((vmd.width != raw_width) && (vmd.height != raw_height))
     {
         printf("input file's dimensions do not match the raw file's dimensions\n");
+        printf("input file: %dx%d; raw file: %dx%d\n", vmd.width, vmd.height, raw_width, raw_height);
         return 1;
     }
 
