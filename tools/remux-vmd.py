@@ -11,7 +11,7 @@ FRAME_RECORD_SIZE = 16
 
 if __name__ == "__main__":
     if len(sys.argv) < 4:
-        print "USAGE: remux-vmd.py <original.vmd> <intermediate.vmd> <final.vmd>"
+        print("USAGE: remux-vmd.py <original.vmd> <intermediate.vmd> <final.vmd>")
         sys.exit(1)
 
     original_vmd = sys.argv[1]
@@ -20,10 +20,10 @@ if __name__ == "__main__":
 
     # validate the input files
     if not os.path.exists(original_vmd):
-        print "can't find " + original_vmd
+        print("can't find " + original_vmd)
         sys.exit(1)
     if not os.path.exists(intermediate_vmd):
-        print "can't find " + intermediate_vmd
+        print("can't find " + intermediate_vmd)
         sys.exit(1)
 
     # open the files, read header, and copy it
